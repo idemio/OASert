@@ -36,9 +36,6 @@
         ],
         "summary": "Finds Pets by id",
         "operationId": "findPetById",
-        "produces": [
-          "application/json"
-        ],
         "parameters": [
           {
             "name": "pet_id",
@@ -135,10 +132,6 @@
         "summary": "Finds Pets by status",
         "description": "Multiple status values can be provided with comma separated strings",
         "operationId": "findPetsByStatus",
-        "produces": [
-          "application/xml",
-          "application/json"
-        ],
         "parameters": [
           {
             "name": "status",
@@ -259,10 +252,6 @@
         "summary": "Finds Pets by status",
         "description": "Multiple status values can be provided with comma separated strings",
         "operationId": "findPetsByStatus",
-        "produces": [
-          "application/xml",
-          "application/json"
-        ],
         "parameters": [
           {
             "name": "status",
