@@ -730,6 +730,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
+name = "openapi-payload-validator"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "http",
+ "jsonschema",
+ "oas3",
+ "once_cell",
+ "openapiv3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "openapiv3"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,20 +781,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "payload-validator"
-version = "0.1.0"
-dependencies = [
- "dashmap",
- "http",
- "jsonschema",
- "oas3",
- "once_cell",
- "openapiv3",
- "serde",
- "serde_json",
 ]
 
 [[package]]

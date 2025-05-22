@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 const PATH_PARAM_LEFT: char = '{';
 const PATH_PARAM_RIGHT: char = '}';
-pub trait SpecValidator {
+pub trait OpenApiValidator {
     fn validate_request(
         &self,
         path: &str,

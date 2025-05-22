@@ -1,6 +1,6 @@
 use crate::OpenApiValidationError;
 use crate::openapi_util::JsonPath;
-use crate::spec_validator::SpecValidator;
+use crate::spec_validator::OpenApiValidator;
 use jsonschema::Validator;
 use oas3::Spec;
 use oas3::spec::{
@@ -123,38 +123,14 @@ impl OpenApiV31xValidator {
         path_to_match: &'a str,
         method_to_match: &'a str,
         spec: &'a Spec,
-        path_param: bool,
     ) -> Option<(&'a Operation, JsonPath)> {
         let spec_paths = match &spec.paths {
             Some(paths) => paths,
             None => return None,
         };
 
-        if path_param {
-            Self::detailed_path_search(path_to_match, method_to_match, spec_paths, spec)
-        } else {
-            if let Some(op) = spec.operation(
-                &http::method::Method::from_str(method_to_match).unwrap(),
-                path_to_match,
-            ) {
-                let mut path = JsonPath::new();
-                path.add_segment(PATHS_KEY.to_string())
-                    .add_segment(path_to_match.to_string())
-                    .add_segment(method_to_match.to_lowercase().to_string());
-                return Some((op, path));
-            }
-            None
-        }
-    }
-
-    fn detailed_path_search<'a>(
-        path_to_match: &'a str,
-        method_to_match: &'a str,
-        paths: &'a BTreeMap<String, PathItem>,
-        spec: &'a Spec,
-    ) -> Option<(&'a Operation, JsonPath)> {
         // Find the matching method
-        for (spec_path, path_item) in paths.iter() {
+        for (spec_path, path_item) in spec_paths.iter() {
             if let Some((_, op)) = path_item
                 .methods()
                 .into_iter()
@@ -406,7 +382,8 @@ impl OpenApiV31xValidator {
     }
 }
 
-impl SpecValidator for OpenApiV31xValidator {
+impl OpenApiValidator for OpenApiV31xValidator {
+
     fn validate_request(
         &self,
         path: &str,
@@ -416,7 +393,7 @@ impl SpecValidator for OpenApiV31xValidator {
         query_params: Option<&HashMap<String, String>>,
     ) -> Result<(), OpenApiValidationError> {
         let (operation, path) =
-            match Self::find_matching_operation(path, method, &self.specification, true) {
+            match Self::find_matching_operation(path, method, &self.specification) {
                 Some((operation, path)) => (operation, path),
                 None => {
                     return Err(OpenApiValidationError::InvalidPath(format!(
@@ -493,7 +470,7 @@ impl SpecValidator for OpenApiV31xValidator {
 #[cfg(test)]
 mod test {
     use crate::openapi_v31x::OpenApiV31xValidator;
-    use crate::spec_validator::SpecValidator;
+    use crate::spec_validator::OpenApiValidator;
     use oas3::spec::{ObjectOrReference, ObjectSchema, SchemaType, SchemaTypeSet};
     use serde_json::{Value, json};
     use std::collections::HashMap;

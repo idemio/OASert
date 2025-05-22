@@ -6,6 +6,9 @@ use oas3::OpenApiV3Spec;
 use serde_json::{Value};
 use openapiv3::OpenAPI;
 use crate::openapi_v31x::OpenApiV31xValidator;
+use crate::openapi_v30x::OpenApiV30xValidator;
+use crate::OpenApiValidationError;
+use crate::spec_validator::OpenApiValidator;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum OpenApiVersion {
@@ -15,7 +18,6 @@ pub enum OpenApiVersion {
 
 impl OpenApiVersion {
     fn is_valid(&self, spec: &Value) -> Result<(), ()> {
-
         let res = match self {
             OpenApiVersion::V30X => {
                 let openapi_version_schema = fs::read_to_string("./resource/openapi-v3.0.x.json").unwrap();
@@ -50,13 +52,13 @@ impl FromStr for OpenApiVersion {
     }
 }
 
-pub enum OpenApiValidator {
+pub enum OpenApiValidators {
     V31X(OpenApiV31xValidator),
-    V30X(())
+    V30X(OpenApiV30xValidator)
 }
 
 pub struct RequestValidator {
-    traverser: OpenApiValidator,
+    traverser: OpenApiValidators,
     version: OpenApiVersion,
     validators: HashMap<String, Validator>
 }
@@ -70,7 +72,7 @@ impl RequestValidator {
         }
     }
 
-    fn create_openapi_v30x(value: Value) -> Result<(), ()> {
+    fn create_openapi_v30x(value: Value) -> Result<OpenApiV30xValidator, ()> {
         todo!()
     }
 
@@ -98,7 +100,7 @@ impl RequestValidator {
                     // TODO - implement 3.0.x validator
                     if let Ok(specification) = Self::create_openapi_v30x(specification) {
                         return Ok(Self {
-                            traverser: OpenApiValidator::V30X(specification),
+                            traverser: OpenApiValidators::V30X(specification),
                             validators: HashMap::new(),
                             version
                         });
@@ -107,7 +109,7 @@ impl RequestValidator {
                 OpenApiVersion::V31X => {
                     if let Ok(specification) = Self::create_openapi_v31x(specification) {
                         return Ok(Self {
-                            traverser: OpenApiValidator::V31X(specification),
+                            traverser: OpenApiValidators::V31X(specification),
                             validators: HashMap::new(),
                             version
                         });
@@ -121,6 +123,7 @@ impl RequestValidator {
     fn validate_request_body(&self, path: &str, method: &str, body: &Value) -> Result<(), ()> {
         todo!()
     }
+
 }
 
 
