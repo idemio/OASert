@@ -55,6 +55,18 @@ pub trait OpenApiValidator {
         })
     }
 
+    /// Extract the content type from headers, or return an error if invalid/missing.
+    fn extract_content_type(headers: &HashMap<String, String>) -> Result<&str, OpenApiValidationError> {
+        headers
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "content-type")
+            .map(|(_, value)| value.as_str())
+            .ok_or(OpenApiValidationError::InvalidRequest(
+                "No content type provided".to_string(),
+            ))
+    }
+
+
     fn validate_schema_from_pointer(
         &self,
         instance: &Value,

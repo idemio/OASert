@@ -6,7 +6,7 @@ use oas3::OpenApiV3Spec;
 use serde_json::{Value};
 use openapiv3::OpenAPI;
 use crate::openapi_v31x::OpenApiV31xValidator;
-use crate::openapi_v30x::OpenApiV30xValidator;
+//use crate::openapi_v30x::OpenApiV30xValidator;
 use crate::OpenApiValidationError;
 use crate::spec_validator::OpenApiValidator;
 
@@ -54,7 +54,7 @@ impl FromStr for OpenApiVersion {
 
 pub enum OpenApiValidators {
     V31X(OpenApiV31xValidator),
-    V30X(OpenApiV30xValidator)
+    V30X(())
 }
 
 pub struct RequestValidator {
@@ -72,7 +72,7 @@ impl RequestValidator {
         }
     }
 
-    fn create_openapi_v30x(value: Value) -> Result<OpenApiV30xValidator, ()> {
+    fn create_openapi_v30x(value: Value) -> Result<(), ()> {
         todo!()
     }
 

@@ -3,6 +3,7 @@ pub mod openapi_v30x;
 pub mod openapi_v31x;
 pub mod openapi_util;
 pub mod spec_validator;
+mod openapi;
 
 use std::fmt::{Display, Formatter};
 

@@ -45,19 +45,23 @@ impl OpenApiV31xValidator {
         path: &JsonPath,
     ) -> Result<JsonPath, OpenApiValidationError> {
         let mut request_body_path = path.clone();
-        let content_type_header = match headers
-            .into_iter()
-            .find(|(header_name, _)| header_name.to_lowercase().starts_with("content-type"))
-        {
-            None => {
-                return Err(OpenApiValidationError::InvalidRequest(
-                    "No content type provided".to_string(),
-                ));
-            }
-            Some((_, header_value)) => header_value,
+        let content_type = match Self::extract_content_type(headers) {
+            Ok(content_type) => content_type,
+            Err(e) => return Err(e)
         };
+//        let content_type_header = match headers
+//            .into_iter()
+//            .find(|(header_name, _)| header_name.to_lowercase().starts_with("content-type"))
+//        {
+//            None => {
+//                return Err(OpenApiValidationError::InvalidRequest(
+//                    "No content type provided".to_string(),
+//                ));
+//            }
+//            Some((_, header_value)) => header_value,
+//        };
 
-        let binding = content_type_header.split(";").collect::<Vec<&str>>();
+        let binding = content_type.split(";").collect::<Vec<&str>>();
         let content_type_header = match binding.iter().find(|header_value| {
             header_value.starts_with("text")
                 || header_value.starts_with("application")
@@ -66,7 +70,7 @@ impl OpenApiV31xValidator {
             None => {
                 return Err(OpenApiValidationError::InvalidContentType(format!(
                     "Invalid content type provided: {}",
-                    content_type_header
+                    content_type
                 )));
             }
             Some(header_value) => header_value,
