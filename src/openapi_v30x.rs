@@ -1,3 +1,4 @@
+pub const OPENAPI_V30X: &str = r##"
 {
   "id": "https://spec.openapis.org/oas/3.0/schema/2021-09-28",
   "$schema": "http://json-schema.org/draft-04/schema#",
@@ -1648,4 +1649,4 @@
       "additionalProperties": false
     }
   }
-}
+}"##;

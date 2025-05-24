@@ -363,79 +363,35 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {                "$ref": "#/components/schemas/Pet"
-              },
-              "examples": {
-                "Cat": {
-                  "summary": "An example of cat",
-                  "description": "An example of cat, using `value` property",
-                  "value": {
-                    "id": 1,
-                    "category": {
-                      "id": 1,
-                      "name": "cat"
-                    },
-                    "name": "fluffy",
-                    "photoUrls": [
-                      "http://example.com/path/to/cat/1.jpg",
-                      "http://example.com/path/to/cat/2.jpg"
-                    ],
-                    "tags": [
+              "schema": {
+                "oneOf": [
+                  {
+                    "allOf": [
                       {
-                        "id": 1,
-                        "name": "cat"
-                      }
-                    ],
-                    "status": "available"
-                  }
-                },
-                "Cat2": {
-                  "summary": "An example of cat",
-                  "description": "An example of cat, using `value` property, which value is an array",
-                  "value": [
-                    {
-                      "id": 1,
-                      "category": {
-                        "id": 1,
-                        "name": "cat"
+                        "$ref": "#/components/schemas/BasePet"
                       },
-                      "name": "fluffy",
-                      "photoUrls": [
-                        "http://example.com/path/to/cat/1.jpg",
-                        "http://example.com/path/to/cat/2.jpg"
-                      ],
-                      "tags": [
-                        {
-                          "id": 1,
-                          "name": "cat"
-                        }
-                      ],
-                      "status": "available"
-                    }
-                  ]
-                },
-                "Dog": {
-                  "summary": "An example of dog",
-                  "description": "An example of dog, using `externalValue` property",
-                  "externalValue": "http://example.com/examples/dog.json"
-                }
+                      {
+                        "$ref": "#/components/schemas/Cat"
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/BasePet"
+                      },
+                      {
+                        "$ref": "#/components/schemas/Dog"
+                      }  
+                    ]
+                    
+                  }
+                ]
               }
             },
             "application/xml": {
               "schema": {
                 "$ref": "#/components/schemas/Pet"
-              },
-              "examples": {
-                "Cat": {
-                  "summary": "An example of cat",
-                  "description": "An example of cat, using `value` property",
-                  "value": "<xml></xml>"
-                },
-                "Dog": {
-                  "summary": "An example of dog",
-                  "description": "An example of dog, using `externalValue` property",
-                  "externalValue": "http://example.com/examples/dog.xml"
-                }
               }
             }
           }
@@ -478,6 +434,41 @@
         },
         "xml": {
           "name": "Tag"
+        }
+      },
+      "BasePet": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "age": {
+            "type": "integer"
+          }
+        }
+      },
+      "Cat": {
+        "type": "object",
+        "properties": {
+          "hunts": {
+            "type": "boolean"
+          },
+          "breed": {
+            "type": "string",
+            "enum": ["Bengal", "Siamese", "Ragdoll", "Birman"]
+          }
+        }
+      },
+      "Dog": {
+        "type": "object",
+        "properties": {
+          "bark": {
+            "type": "boolean"
+          },
+          "breed": {
+            "type": "string",
+            "enum": ["Dingo", "Husky", "Retriever", "Shepherd"]
+          }
         }
       },
       "Pet": {

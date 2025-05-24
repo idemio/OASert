@@ -1,4 +1,4 @@
-{
+pub const OPENAPI_V31X: &str = r##"{
   "$id": "https://spec.openapis.org/oas/3.1/schema/2025-02-13",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "The description of OpenAPI v3.1.x Documents without Schema Object validation",
@@ -1405,4 +1405,4 @@
       }
     }
   }
-}
+}"##;
