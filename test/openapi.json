@@ -363,8 +363,7 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Pet"
+              "schema": {                "$ref": "#/components/schemas/Pet"
               },
               "examples": {
                 "Cat": {
