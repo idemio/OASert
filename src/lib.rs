@@ -1,13 +1,13 @@
 mod openapi_v30x;
 mod openapi_v31x;
 
+use dashmap::{DashMap, Entry};
 use jsonschema::{Draft, Resource, ValidationError, ValidationOptions, Validator};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use dashmap::DashMap;
 use unicase::UniCase;
 
 pub enum OpenApiVersion {
@@ -140,32 +140,34 @@ impl OpenApiValidator {
         &self,
         request_path: &str,
         request_method: &str,
-    ) -> Result<(&Value, JsonPath), OpenApiValidationError> {
+    ) -> Result<(Arc<Value>, JsonPath), OpenApiValidationError> {
         // Grab all paths from the spec
-        if let Ok(spec_paths) = &self.traverser.get_paths() {
+        if let Ok(spec_paths) = self.traverser.get_paths() {
             // For each path there are 1 to n methods.
-            for (spec_path, spec_path_methods) in spec_paths.iter() {
-                let operations = match spec_path_methods.as_object() {
-                    Some(x) => x,
-                    None => {
-                        return Err(OpenApiValidationError::InvalidSchema(format!(
-                            "Specification path {} is not an object type",
-                            spec_path
-                        )));
-                    }
-                };
+            if let Some(spec_paths) = spec_paths.as_object() {
+                for (spec_path, spec_path_methods) in spec_paths.iter() {
+                    let operations = match spec_path_methods.as_object() {
+                        Some(x) => x,
+                        None => {
+                            return Err(OpenApiValidationError::InvalidSchema(format!(
+                                "Specification path {} is not an object type",
+                                spec_path
+                            )));
+                        }
+                    };
 
-                // Grab the operation matching our request method and test to see if the path matches our request path.
-                // If both method and path match, then we've found the operation associated with the request.
-                if let Some(operation) = operations.get(request_method) {
-                    let path_params = operation.get("parameters").and_then(|v| v.as_array());
-                    if Self::matches_spec_path(path_params, request_path, spec_path) {
-                        let mut json_path = JsonPath::new();
-                        json_path
-                            .add_segment("paths")
-                            .add_segment(spec_path)
-                            .add_segment(&request_method.to_lowercase());
-                        return Ok((operation, json_path));
+                    // Grab the operation matching our request method and test to see if the path matches our request path.
+                    // If both method and path match, then we've found the operation associated with the request.
+                    if let Some(operation) = operations.get(request_method) {
+                        let path_params = operation.get("parameters").and_then(|v| v.as_array());
+                        if Self::matches_spec_path(path_params, request_path, spec_path) {
+                            let mut json_path = JsonPath::new();
+                            json_path
+                                .add_segment("paths")
+                                .add_segment(spec_path)
+                                .add_segment(&request_method.to_lowercase());
+                            return Ok((Arc::new(operation.clone()), json_path));
+                        }
                     }
                 }
             }
@@ -272,36 +274,38 @@ impl OpenApiValidator {
 
     fn validate_headers(
         &self,
-        param_schemas: &Vec<Value>,
+        param_schemas: &Value,
         headers: Option<&HashMap<UniCase<String>, String>>,
     ) -> Result<(), OpenApiValidationError> {
         if let Err(e) = self.check_required_params(param_schemas, headers) {
             return Err(e);
         }
 
-        for param in param_schemas {
-            if param
-                .get("in")
-                .is_some_and(|param| param.as_str().is_some_and(|param| param == "header"))
-            {
-                let is_required = param
-                    .get("required")
-                    .and_then(|req| req.as_bool())
-                    .unwrap_or(false);
-                let name = param.get("name").and_then(|name| name.as_str()).unwrap();
-                let schema = param.get("schema").unwrap();
-
-                if let Some(header_value) =
-                    headers.and_then(|headers| headers.get(&UniCase::<String>::from(name)))
+        if let Some(param_schemas) = param_schemas.as_array() {
+            for param in param_schemas {
+                if param
+                    .get("in")
+                    .is_some_and(|param| param.as_str().is_some_and(|param| param == "header"))
                 {
-                    if let Err(e) = Self::simple_validation(schema, &json!(header_value)) {
-                        return Err(e);
+                    let is_required = param
+                        .get("required")
+                        .and_then(|req| req.as_bool())
+                        .unwrap_or(false);
+                    let name = param.get("name").and_then(|name| name.as_str()).unwrap();
+                    let schema = param.get("schema").unwrap();
+
+                    if let Some(header_value) =
+                        headers.and_then(|headers| headers.get(&UniCase::<String>::from(name)))
+                    {
+                        if let Err(e) = Self::simple_validation(schema, &json!(header_value)) {
+                            return Err(e);
+                        }
+                    } else if is_required {
+                        return Err(OpenApiValidationError::InvalidHeaders(format!(
+                            "Missing request header: '{}'",
+                            name
+                        )));
                     }
-                } else if is_required {
-                    return Err(OpenApiValidationError::InvalidHeaders(format!(
-                        "Missing request header: '{}'",
-                        name
-                    )));
                 }
             }
         }
@@ -349,10 +353,10 @@ impl OpenApiValidator {
 
     fn check_required_params(
         &self,
-        param_schemas: &Vec<Value>,
+        param_schemas: &Value,
         request_params: Option<&HashMap<UniCase<String>, String>>,
     ) -> Result<(), OpenApiValidationError> {
-        if let Some(headers) = request_params {
+        if let (Some(headers), Some(param_schemas)) = (request_params, param_schemas.as_array()) {
             for param in param_schemas {
                 let param_name = param.get("name").and_then(|name| name.as_str()).unwrap();
                 let section = param.get("in").and_then(|name| name.as_str()).unwrap();
@@ -374,7 +378,7 @@ impl OpenApiValidator {
 
     fn validate_query_params(
         &self,
-        request_params: &Vec<Value>,
+        request_params: &Value,
         query_params: Option<&HashMap<UniCase<String>, String>>,
     ) -> Result<(), OpenApiValidationError> {
         if let Err(e) = self.check_required_params(request_params, query_params) {
@@ -414,21 +418,21 @@ impl OpenApiValidator {
                     .add_segment("content")
                     .add_segment(content_type)
                     .add_segment("schema");
-                match self.traverser.get_request_body(operation, content_type) {
+                match self.traverser.get_request_body(&operation, content_type) {
                     Ok(val) => Some(val),
-                    Err(_) => None
+                    Err(_) => None,
                 }
             }
         };
 
-        let spec_parameters = match self.traverser.get_request_parameters(operation) {
+        let spec_parameters = match self.traverser.get_request_parameters(&operation) {
             Ok(val) => Some(val),
-            Err(_) => None
+            Err(_) => None,
         };
 
         if let Err(e) = match (body.is_some(), request_schema) {
             (true, Some(request_body_schema)) => {
-                self.validate_body(&path, request_body_schema, body)
+                self.validate_body(&path, &request_body_schema, body)
             }
 
             (true, None) => Err(OpenApiValidationError::InvalidRequest(
@@ -440,13 +444,13 @@ impl OpenApiValidator {
             return Err(e);
         }
 
-        if let Err(e) = match (headers.is_some(), spec_parameters) {
+        if let Err(e) = match (headers.is_some(), spec_parameters.clone()) {
             // if we have header params in our request and the spec contains params, do the validation.
-            (true, Some(request_params)) => self.validate_headers(request_params, headers),
+            (true, Some(request_params)) => self.validate_headers(&request_params, headers),
 
             // If no header params were provided and the spec contains params,
             // check to see if there are any required header params.
-            (false, Some(request_params)) => self.check_required_params(request_params, None),
+            (false, Some(request_params)) => self.check_required_params(&request_params, None),
 
             // passthrough
             (_, _) => Ok(()),
@@ -457,12 +461,12 @@ impl OpenApiValidator {
         if let Err(e) = match (query_params.is_some(), spec_parameters) {
             // If we have query params in our request and the spec contains params, do the validation.
             (true, Some(request_params)) => {
-                self.validate_query_params(request_params, query_params)
+                self.validate_query_params(&request_params, query_params)
             }
 
             // If no query params were provided and the spec contains params,
             // check to see if there are any required query params.
-            (false, Some(request_params)) => self.check_required_params(request_params, None),
+            (false, Some(request_params)) => self.check_required_params(&request_params, None),
 
             // If query params were provided, but the spec contains no param definitions, raise a validation error.
             (true, None) => Err(OpenApiValidationError::InvalidRequest(
@@ -479,6 +483,8 @@ impl OpenApiValidator {
     }
 }
 
+type TraverseResult = Result<Arc<Value>, OpenApiValidationError>;
+
 struct OpenApiTraverser {
     specification: Value,
     // Add a DashMap to cache resolved references
@@ -493,180 +499,172 @@ impl OpenApiTraverser {
         }
     }
 
-    fn get_request_body<'a>(
-        &'a self,
-        operation: &'a Value,
-        content_type: &'a str,
-    ) -> Result<&'a Value, OpenApiValidationError> {
+    fn get_request_body(&self, operation: &Value, content_type: &str) -> TraverseResult {
         self.get(operation, "requestBody")
-            .and_then(|node| self.get(node, "content"))
-            .and_then(|node| self.get(node, content_type))
-            .and_then(|node| self.get(node, "schema"))
+            .and_then(|node| self.get(node.as_ref(), "content"))
+            .and_then(|node| self.get(node.as_ref(), content_type))
+            .and_then(|node| self.get(node.as_ref(), "schema"))
     }
 
-    fn get_paths<'a>(&self) -> Result<&Map<String, Value>, OpenApiValidationError> {
-        self.get_as_map(&self.specification, "paths")
+    fn get_paths(&self) -> TraverseResult {
+        self.get(&self.specification, "paths")
     }
 
-    fn get_request_parameters<'a>(
-        &'a self,
-        operation: &'a Value,
-    ) -> Result<&'a Vec<Value>, OpenApiValidationError> {
-        self.get_as_array(operation, "parameters")
+    fn get_request_parameters<'a>(&'a self, operation: &'a Value) -> TraverseResult {
+        self.get(operation, "parameters")
     }
 
-    fn get_request_security<'a>(
-        &'a self,
-        operation: &'a Value,
-    ) -> Result<&'a Vec<Value>, OpenApiValidationError> {
-        self.get_as_array(operation, "security")
+    fn get_request_security(&self, operation: &Value) -> TraverseResult {
+        self.get(operation, "security")
     }
 
-    fn get_as_map<'a>(
-        &'a self,
-        value: &'a Value,
-        field: &'a str,
-    ) -> Result<&'a Map<String, Value>, OpenApiValidationError> {
-        let node = self.get(value, field)?;
-        match node.as_object() {
-            None => Err(OpenApiValidationError::InvalidType(format!(
-                "Value '{field}' is not a map type"
-            ))),
-            Some(map) => Ok(map),
-        }
+    fn get(&self, value: &Value, field: &str) -> TraverseResult {
+        self.check_for_ref(value)
+            .and_then(|val| Self::get_node(val.as_ref(), field))
     }
 
-    fn get_as_array<'a>(
-        &'a self,
-        value: &'a Value,
-        field: &'a str,
-    ) -> Result<&'a Vec<Value>, OpenApiValidationError> {
-        let node = self.get(value, field)?;
-        match node.as_array() {
-            None => Err(OpenApiValidationError::InvalidType(format!(
-                "Value '{node}' is not an array type"
-            ))),
-            Some(array) => Ok(array),
-        }
-    }
-
-    fn get<'a>(
-        &'a self,
-        value: &'a Value,
-        field: &'a str,
-    ) -> Result<&'a Value, OpenApiValidationError> {
-        self.check_for_ref(value).and_then(|val| Self::get_node(val, field))
-    }
-
-    fn get_node<'a>(value: &'a Value, field: &'a str) -> Result<&'a Value, OpenApiValidationError> {
+    fn get_node(value: &Value, field: &str) -> TraverseResult {
         match value.get(field) {
             None => Err(OpenApiValidationError::RequiredFieldMissing(format!(
-                "Node {value} is missing field '{field}'"
+                "Missing field '{}'",
+                field
             ))),
-            Some(val) => Ok(val),
+            Some(val) => Ok(Arc::new(val.clone())),
         }
     }
 
-    fn check_for_ref<'a>(
-        &'a self,
-        node: &'a Value,
-    ) -> Result<&'a Value, OpenApiValidationError> {
+    fn check_for_ref(&self, node: &Value) -> TraverseResult {
         if let Some(ref_string) = node.get("$ref").and_then(|val| val.as_str()) {
-            let mut seen_references = HashSet::new();
-            return self.get_reference_path(ref_string, &mut seen_references);
+            let entry = self.resolved_references.entry(String::from(ref_string));
+            return match entry {
+                Entry::Occupied(e) => Ok(e.get().clone()),
+                Entry::Vacant(_) => {
+                    let mut seen_references = HashSet::new();
+                    self.get_reference_path(ref_string, &mut seen_references)
+                }
+            };
         }
-        Ok(node)
+        Ok(Arc::new(node.clone()))
     }
 
-    fn get_reference_path<'a>(
-        &'a self,
-        ref_string: &'a str,
+    fn get_reference_path(
+        &self,
+        ref_string: &str,
         seen_references: &mut HashSet<String>,
-    ) -> Result<&'a Value, OpenApiValidationError> {
-        // Check for circular references
+    ) -> TraverseResult {
         if seen_references.contains(ref_string) {
             return Err(OpenApiValidationError::InvalidSchema(format!(
                 "Circular reference found when resolving reference string '{}'",
                 ref_string
             )));
         }
+        seen_references.insert(String::from(ref_string));
+        let path = ref_string.split("/");
+        let mut current_schema = &self.specification;
+        for segment in path {
 
-        seen_references.insert(ref_string.to_string());
-        let path = ref_string.split("/").collect::<Vec<&str>>();
-
-        let mut current_value = &self.specification;
-
-        for index in 0..path.len() {
-            // Check if current node is itself a reference
-            if let Some(nested_ref) = current_value.get("$ref").and_then(|val| val.as_str()) {
-                if seen_references.contains(nested_ref) {
-                    return Err(OpenApiValidationError::InvalidSchema(format!(
-                        "Circular reference found when resolving nested reference '{}'",
-                        nested_ref
+            // Navigate to the next segment
+            match current_schema.get(segment) {
+                Some(next) => {
+                    current_schema = next;
+                }
+                None => {
+                    return Err(OpenApiValidationError::RequiredFieldMissing(format!(
+                        "Node missing field '{}'",
+                        segment
                     )));
                 }
-
-                // Check if nested reference is in cache
-                if let Some(entry) = self.resolved_references.get(nested_ref) {
-                    // SAFETY: We're using mem::transmute to ensure the value outlives this function
-                    let resolved: &'a Value = unsafe {
-                        std::mem::transmute::<&Value, &'a Value>(entry.value().as_ref())
-                    };
-                    current_value = resolved;
-                } else {
-                    match self.get_reference_path(
-                        //current_value,
-                        nested_ref,
-                        seen_references,
-                    ) {
-                        Ok(resolved) => {
-
-                            // Cache the resolved nested reference
-                            let resolved_clone = resolved.clone();
-                            let arc_value = Arc::new(resolved_clone);
-                            self.resolved_references.insert(nested_ref.to_string(), arc_value.clone());
-
-                            // SAFETY: We're using mem::transmute to ensure the value outlives this function
-                            let stored_value: &'a Value = unsafe {
-                                std::mem::transmute::<&Value, &'a Value>(arc_value.as_ref())
-                            };
-
-                            current_value = stored_value;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-
-            let segment = match path.get(index) {
-                Some(x) => x,
-                None => {
-                    return Err(OpenApiValidationError::InvalidPath(
-                        "Provided path is malformed".to_string(),
-                    ));
-                }
-            };
-
-            if *segment == "#" {
-                continue;
-            }
-
-            if let Some(next) = current_value.get(segment) {
-                current_value = next;
-            } else {
-                return Err(OpenApiValidationError::RequiredFieldMissing(format!(
-                    "Node {current_value} is missing field '{segment}'"
-                )));
             }
         }
+        let current_schema = self.check_for_ref(current_schema)?;
+        self.resolved_references
+            .insert(String::from(ref_string), current_schema.clone());
 
-        // Check if the final node is itself a reference
-        if current_value.get("$ref").is_some() {
-            return self.check_for_ref(current_value);
-        }
-
-        Ok(current_value)
+        Ok(current_schema)
     }
+
+    // todo - make sure i dont need this before i delete
+//    fn get_reference_path(
+//        &self,
+//        ref_string: &str,
+//        seen_references: &mut HashSet<String>,
+//    ) -> TraverseResult {
+//        // Check for circular references
+//        if seen_references.contains(ref_string) {
+//            return Err(OpenApiValidationError::InvalidSchema(format!(
+//                "Circular reference found when resolving reference string '{}'",
+//                ref_string
+//            )));
+//        }
+//
+//        seen_references.insert(String::from(ref_string));
+//
+//        // Check if the reference is already in cache
+//        let entry = self.resolved_references.entry(String::from(ref_string));
+//        match entry {
+//            Entry::Occupied(e) => Ok(e.get().clone()),
+//            Entry::Vacant(_) => {
+//                let path = ref_string.split("/");
+//
+//                // Start with a reference to the specification and follow the path
+//                let mut current_schema = &self.specification;
+//                // This is to hold onto the results of any sub calls.
+//                let mut resolved_sub_reference: Arc<Value> = Arc::default();
+//
+//                for segment in path {
+//                    if segment == "#" {
+//                        continue;
+//                    }
+//
+//                    // Check if current node is itself a reference
+//                    if let Some(nested_ref) =
+//                        current_schema.get("$ref").and_then(|val| val.as_str())
+//                    {
+//                        if seen_references.contains(nested_ref) {
+//                            return Err(OpenApiValidationError::InvalidSchema(format!(
+//                                "Circular reference found when resolving nested reference '{}'",
+//                                nested_ref
+//                            )));
+//                        }
+//
+//                        // Resolve the nested reference
+//                        resolved_sub_reference =
+//                            self.get_reference_path(nested_ref, seen_references)?;
+//                        current_schema = &resolved_sub_reference;
+//                    }
+//
+//                    // Navigate to the next segment
+//                    match current_schema.get(segment) {
+//                        Some(next) => {
+//                            current_schema = next;
+//                        }
+//                        None => {
+//                            return Err(OpenApiValidationError::RequiredFieldMissing(format!(
+//                                "Node missing field '{}'",
+//                                segment
+//                            )));
+//                        }
+//                    }
+//                }
+//
+//                // Check if the final node is itself a reference
+//                if let Some(final_ref) = current_schema.get("$ref").and_then(|val| val.as_str()) {
+//                    let result = self.get_reference_path(final_ref, seen_references)?;
+//                    // Cache the result
+//                    self.resolved_references
+//                        .insert(String::from(ref_string), result.clone());
+//                    return Ok(result);
+//                }
+//
+//                let arc_result = Arc::new(current_schema.clone());
+//                // Cache the resolved reference
+//                self.resolved_references
+//                    .insert(String::from(ref_string), arc_result.clone());
+//
+//                Ok(arc_result)
+//            }
+//        }
+//    }
 }
 
 #[derive(Debug)]
@@ -725,7 +723,7 @@ impl JsonPath {
             let segment = segment.replace("/", "~1");
             self.0.push(segment);
         } else {
-            self.0.push(segment.to_string());
+            self.0.push(segment.to_owned());
         }
 
         self
@@ -739,32 +737,48 @@ impl JsonPath {
 #[cfg(test)]
 mod test {
     use crate::{JsonPath, OpenApiTraverser, OpenApiValidator};
+    use memory_stats::memory_stats;
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::fs;
+    use std::sync::Arc;
     use unicase::UniCase;
+
+    fn print_memory() {
+        if let Some(usage) = memory_stats() {
+            println!("Current physical memory usage: {}", usage.physical_mem);
+            println!("Current virtual memory usage: {}", usage.virtual_mem);
+        } else {
+            println!("Couldn't get the current memory usage :(");
+        }
+    }
 
     #[test]
     fn test_find_operation() {
         let spec_string = fs::read_to_string("./test/openapi-v3.0.2.json").unwrap();
         let specification: Value = serde_json::from_str(&spec_string).unwrap();
         let validator = OpenApiValidator::new(specification, false).unwrap();
-
-        let result = validator.get_operation("/pet/findByStatus/MultipleExamples", "get");
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(
-            "paths/~1pet~1findByStatus~1MultipleExamples/get",
-            result.1.format_path()
-        );
-
-        let result = validator.get_operation("/pet/findById/123", "get");
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(
-            "paths/~1pet~1findById~1{pet_id}/get",
-            result.1.format_path()
-        )
+        print_memory();
+        {
+            let result = validator.get_operation("/pet/findByStatus/MultipleExamples", "get");
+            assert!(result.is_ok());
+            let result = result.unwrap();
+            assert_eq!(
+                "paths/~1pet~1findByStatus~1MultipleExamples/get",
+                result.1.format_path()
+            );
+        }
+        print_memory();
+        {
+            let result = validator.get_operation("/pet/findById/123", "get");
+            assert!(result.is_ok());
+            let result = result.unwrap();
+            assert_eq!(
+                "paths/~1pet~1findById~1{pet_id}/get",
+                result.1.format_path()
+            );
+        }
+        print_memory();
     }
 
     #[test]
@@ -773,12 +787,55 @@ mod test {
         let specification: Value = serde_json::from_str(&spec_string).unwrap();
         let traverser = OpenApiTraverser::new(specification.clone());
         let validator = OpenApiValidator::new(specification, false).unwrap();
-        let result: (&Value, JsonPath) = validator.get_operation("/pet", "post").unwrap();
-
-        let operation = result.0;
+        let result: (Arc<Value>, JsonPath) = validator.get_operation("/pet", "post").unwrap();
+        let operation = result.0.clone();
         assert!(operation.get("requestBody").is_some());
-        let request_body = traverser.get_request_body(result.0, "application/json");
+        let request_body = traverser.get_request_body(&result.0, "application/json");
         assert!(request_body.is_ok());
+    }
+
+    #[test]
+    fn test_validate_wild_request() {
+        let spec_string = fs::read_to_string("./test/wild-openapi-spec.json").unwrap();
+        let specification: Value = serde_json::from_str(&spec_string).unwrap();
+        let validator = OpenApiValidator::new(specification, false).unwrap();
+        let example_request = json!({
+          "layerTwo": {
+            "layerThree": {
+              "data": {
+                "customField1": "value1",
+                "customField2": 42
+              }
+            }
+          }
+        });
+        let mut example_headers: HashMap<UniCase<String>, String> = HashMap::new();
+        example_headers.insert(
+            UniCase::from("Content-Type"),
+            "application/json".to_string(),
+        );
+        let path = "/pet";
+        let method = "post";
+
+        for x in 0..25 {
+            println!("it: {x}");
+            print_memory();
+
+            let result = validator.validate_request(
+                path,
+                method,
+                Some(&example_request),
+                Some(&example_headers),
+                None,
+            );
+            match result {
+                Ok(_) => assert!(true, "Body is valid"),
+                Err(e) => {
+                    println!("{e:#?}");
+                    assert!(false, "Body should be valid")
+                }
+            }
+        }
     }
 
     #[test]
