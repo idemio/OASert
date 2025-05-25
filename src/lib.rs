@@ -1,5 +1,6 @@
 mod openapi_v30x;
 mod openapi_v31x;
+mod openapi_common;
 
 use dashmap::{DashMap, Entry};
 use jsonschema::{Draft, Resource, ValidationError, ValidationOptions, Validator};
@@ -62,7 +63,7 @@ struct OpenApiValidator {
 }
 
 impl OpenApiValidator {
-    fn new(mut value: Value, validate_spec: bool) -> Result<Self, OpenApiValidationError> {
+    fn new(mut value: Value, _validate_spec: bool) -> Result<Self, OpenApiValidationError> {
         // Assign ID for schema validation in the future.
         value["$id"] = json!("@@root");
 
@@ -73,31 +74,31 @@ impl OpenApiValidator {
         };
 
         // Validate the provided spec if the option is enabled.
-        if validate_spec {
-            match draft {
-                Draft::Draft4 => {
-                    let spec_schema: Value =
-                        serde_json::from_str(openapi_v30x::OPENAPI_V30X).unwrap();
-                    if let Err(e) = jsonschema::draft4::validate(&spec_schema, &value) {
-                        return Err(OpenApiValidationError::InvalidSchema(format!(
-                            "Provided 3.0.x openapi specification failed validation: {}",
-                            e.to_string()
-                        )));
-                    }
-                }
-                Draft::Draft202012 => {
-                    let spec_schema: Value =
-                        serde_json::from_str(openapi_v31x::OPENAPI_V31X).unwrap();
-                    if let Err(e) = jsonschema::draft202012::validate(&spec_schema, &value) {
-                        return Err(OpenApiValidationError::InvalidSchema(format!(
-                            "Provided 3.1.x openapi specification failed validation: {}",
-                            e.to_string()
-                        )));
-                    }
-                }
-                _ => unreachable!(""),
-            }
-        }
+//        if validate_spec {
+//            match draft {
+//                Draft::Draft4 => {
+//                    let spec_schema: Value =
+//                        serde_json::from_str(openapi_v30x::OPENAPI_V30X).unwrap();
+//                    if let Err(e) = jsonschema::draft4::validate(&spec_schema, &value) {
+//                        return Err(OpenApiValidationError::InvalidSchema(format!(
+//                            "Provided 3.0.x openapi specification failed validation: {}",
+//                            e.to_string()
+//                        )));
+//                    }
+//                }
+//                Draft::Draft202012 => {
+//                    let spec_schema: Value =
+//                        serde_json::from_str(openapi_v31x::OPENAPI_V31X).unwrap();
+//                    if let Err(e) = jsonschema::draft202012::validate(&spec_schema, &value) {
+//                        return Err(OpenApiValidationError::InvalidSchema(format!(
+//                            "Provided 3.1.x openapi specification failed validation: {}",
+//                            e.to_string()
+//                        )));
+//                    }
+//                }
+//                _ => unreachable!(""),
+//            }
+//        }
 
         // Create this resource once and re-use it for multiple validation calls.
         let resource = match Resource::from_contents(value.clone()) {
@@ -134,95 +135,6 @@ impl OpenApiValidator {
         Err(OpenApiValidationError::InvalidSchema(
             "Provided spec does not contain 'openapi' field".to_string(),
         ))
-    }
-
-    fn get_operation(
-        &self,
-        request_path: &str,
-        request_method: &str,
-    ) -> Result<(Arc<Value>, JsonPath), OpenApiValidationError> {
-        // Grab all paths from the spec
-        if let Ok(spec_paths) = self.traverser.get_paths() {
-            // For each path there are 1 to n methods.
-            if let Some(spec_paths) = spec_paths.as_object() {
-                for (spec_path, spec_path_methods) in spec_paths.iter() {
-                    let operations = match spec_path_methods.as_object() {
-                        Some(x) => x,
-                        None => {
-                            return Err(OpenApiValidationError::InvalidSchema(format!(
-                                "Specification path {} is not an object type",
-                                spec_path
-                            )));
-                        }
-                    };
-
-                    // Grab the operation matching our request method and test to see if the path matches our request path.
-                    // If both method and path match, then we've found the operation associated with the request.
-                    if let Some(operation) = operations.get(request_method) {
-                        let path_params = operation.get("parameters").and_then(|v| v.as_array());
-                        if Self::matches_spec_path(path_params, request_path, spec_path) {
-                            let mut json_path = JsonPath::new();
-                            json_path
-                                .add_segment("paths")
-                                .add_segment(spec_path)
-                                .add_segment(&request_method.to_lowercase());
-                            return Ok((Arc::new(operation.clone()), json_path));
-                        }
-                    }
-                }
-            }
-        }
-        Err(OpenApiValidationError::InvalidPath(format!(
-            "No path found in specification matching provided path '{}' and method '{}'",
-            request_path, request_method
-        )))
-    }
-
-    fn matches_spec_path(
-        _path_params: Option<&Vec<Value>>,
-        path_to_match: &str,
-        spec_path: &str,
-    ) -> bool {
-        // Fast branch.
-        // If the spec path we are checking contains no path parameters,
-        // then we can simply compare path strings.
-        if !(spec_path.contains("{") && spec_path.contains("}")) {
-            spec_path == path_to_match
-
-        // if the request path contains path parameters, we need to compare each segment
-        // When we reach a segment that is a parameter, compare the value in the path to the value in the spec.
-        } else {
-            let target_segments = path_to_match.split('/').collect::<Vec<&str>>();
-            let spec_segments = spec_path.split('/').collect::<Vec<&str>>();
-
-            if spec_segments.len() != target_segments.len() {
-                return false;
-            }
-
-            let (matching_segments, segment_count) =
-                spec_segments.iter().zip(target_segments.iter()).fold(
-                    (0, 0),
-                    |(mut matches, mut count), (spec_segment, target_segment)| {
-                        count += 1;
-
-                        // TODO - compare the value in the request with the schema in the spec.
-                        if let Some(_) = spec_segment.find("{").and_then(|start| {
-                            spec_segment
-                                .find("}")
-                                .map(|end| &spec_segment[start + 1..end])
-                        }) {
-                            // assume the path param type matches
-                            matches += 1;
-                        } else if spec_segment == target_segment {
-                            matches += 1;
-                        }
-
-                        (matches, count)
-                    },
-                );
-
-            matching_segments == segment_count
-        }
     }
 
     fn validate_body(
@@ -406,7 +318,7 @@ impl OpenApiValidator {
         headers: Option<&HashMap<UniCase<String>, String>>,
         query_params: Option<&HashMap<UniCase<String>, String>>,
     ) -> Result<(), OpenApiValidationError> {
-        let (operation, mut path) = match self.get_operation(path, method) {
+        let (operation, mut path) = match self.traverser.get_operation(path, method) {
             Err(e) => return Err(e),
             Ok(val) => (val.0, val.1),
         };
@@ -487,11 +399,20 @@ type TraverseResult = Result<Arc<Value>, OpenApiValidationError>;
 
 struct OpenApiTraverser {
     specification: Value,
-    // Add a DashMap to cache resolved references
     resolved_references: DashMap<String, Arc<Value>>,
 }
 
 impl OpenApiTraverser {
+    const CONTENT_FIELD: &'static str = "content";
+    const SCHEMA_FIELD: &'static str = "schema";
+    const REQUEST_BODY_FIELD: &'static str = "requestBody";
+    const PATHS_FIELD: &'static str = "paths";
+    const PARAMETERS_FIELD: &'static str = "parameters";
+    const REF_FIELD: &'static str = "$ref";
+    const SECURITY_FIELD: &'static str = "security";
+    const PATH_SEPARATOR: &'static str = "/";
+    const ENCODED_BACKSLASH: &'static str = "~1";
+
     fn new(specification: Value) -> Self {
         Self {
             specification,
@@ -499,42 +420,233 @@ impl OpenApiTraverser {
         }
     }
 
+    /// Finds and returns the matching operation from the OpenAPI specification based on the request path and method.
+    ///
+    /// # Arguments
+    /// * `request_path` - The path of the incoming request (e.g., "/users/123")
+    /// * `request_method` - The HTTP method of the request (e.g., "GET", "POST")
+    ///
+    /// # Returns
+    /// * `Ok((Arc<Value>, JsonPath))` - A tuple containing:
+    ///   - An Arc-wrapped JSON Value representing the operation object from the OpenAPI spec
+    ///   - A JsonPath object representing the path to the operation in the spec
+    /// * `Err(OpenApiValidationError)` - Returns an error if no matching operation is found or if the
+    ///   specification is invalid
+    fn get_operation(
+        &self,
+        request_path: &str,
+        request_method: &str,
+    ) -> Result<(Arc<Value>, JsonPath), OpenApiValidationError> {
+        // Grab all paths from the spec
+        if let Ok(spec_paths) = self.get_paths() {
+            // For each path there are 1 to n methods.
+            if let Some(spec_paths) = spec_paths.as_object() {
+                for (spec_path, spec_path_methods) in spec_paths.iter() {
+                    let operations = match spec_path_methods.as_object() {
+                        Some(x) => x,
+                        None => {
+                            return Err(OpenApiValidationError::InvalidSchema(format!(
+                                "Specification path {} is not an object type",
+                                spec_path
+                            )));
+                        }
+                    };
+
+                    // Grab the operation matching our request method and test to see if the path matches our request path.
+                    // If both method and path match, then we've found the operation associated with the request.
+                    if let Some(operation) = operations.get(request_method) {
+                        let path_params = self.get_request_parameters(operation)?;
+                        let path_params = path_params.as_array();
+                        if Self::matches_spec_path(path_params, request_path, spec_path) {
+                            let mut json_path = JsonPath::new();
+                            json_path
+                                .add_segment("paths")
+                                .add_segment(spec_path)
+                                .add_segment(&request_method.to_lowercase());
+                            return Ok((Arc::new(operation.clone()), json_path));
+                        }
+                    }
+                }
+            }
+        }
+        Err(OpenApiValidationError::InvalidPath(format!(
+            "No path found in specification matching provided path '{}' and method '{}'",
+            request_path, request_method
+        )))
+    }
+
+    /// Determines if a given path matches an OpenAPI specification path pattern.
+    ///
+    /// This function checks if a request path matches a specification path, handling path parameters
+    /// enclosed in curly braces (e.g., "/users/{id}").
+    ///
+    /// # Arguments
+    ///
+    /// * `_path_params` - An optional reference to a vector of values representing path parameters.
+    ///   Currently unused in the implementation.
+    /// * `path_to_match` - The actual request path to check against the specification.
+    /// * `spec_path` - The specification path pattern that may contain path parameters in the format "{param_name}".
+    ///
+    /// # Returns
+    ///
+    /// * `true` if the path matches the specification pattern, accounting for path parameters.
+    /// * `false` if the path does not match the pattern or has a different number of segments.
+    fn matches_spec_path(
+        _path_params: Option<&Vec<Value>>,
+        path_to_match: &str,
+        spec_path: &str,
+    ) -> bool {
+        // If the spec path we are checking contains no path parameters,
+        // then we can simply compare path strings.
+        if !(spec_path.contains("{") && spec_path.contains("}")) {
+            spec_path == path_to_match
+
+        // if the request path contains path parameters, we need to compare each segment
+        // When we reach a segment that is a parameter, compare the value in the path to the value in the spec.
+        } else {
+            let target_segments = path_to_match.split(Self::PATH_SEPARATOR).collect::<Vec<&str>>();
+            let spec_segments = spec_path.split(Self::PATH_SEPARATOR).collect::<Vec<&str>>();
+
+            if spec_segments.len() != target_segments.len() {
+                return false;
+            }
+
+            let (matching_segments, segment_count) =
+                spec_segments.iter().zip(target_segments.iter()).fold(
+                    (0, 0),
+                    |(mut matches, mut count), (spec_segment, target_segment)| {
+                        count += 1;
+
+                        // TODO - compare the value in the request with the schema in the spec.
+                        if let Some(_) = spec_segment.find("{").and_then(|start| {
+                            spec_segment
+                                .find("}")
+                                .map(|end| &spec_segment[start + 1..end])
+                        }) {
+                            // assume the path param type matches
+                            matches += 1;
+                        } else if spec_segment == target_segment {
+                            matches += 1;
+                        }
+
+                        (matches, count)
+                    },
+                );
+
+            matching_segments == segment_count
+        }
+    }
+
+    /// Retrieves the schema of a request body for a specific content type from an OpenAPI operation object.
+    ///
+    /// # Arguments
+    ///
+    /// * `operation` - A JSON value representing an OpenAPI operation object
+    /// * `content_type` - A string specifying the media type (e.g., "application/json") to look up
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<Value>)` - An `Arc` pointer to the schema of the request body for the specified content type
+    /// * `Err(OpenApiValidationError)` - An error if any part of the path (requestBody, content, content_type, schema) is missing
     fn get_request_body(&self, operation: &Value, content_type: &str) -> TraverseResult {
-        self.get(operation, "requestBody")
-            .and_then(|node| self.get(node.as_ref(), "content"))
-            .and_then(|node| self.get(node.as_ref(), content_type))
-            .and_then(|node| self.get(node.as_ref(), "schema"))
+        self.get(operation, Self::REQUEST_BODY_FIELD)
+            .and_then(|node| self.get(&node, Self::CONTENT_FIELD))
+            .and_then(|node| self.get(&node, content_type))
+            .and_then(|node| self.get(&node, Self::SCHEMA_FIELD))
     }
 
+    /// Retrieves the "paths" object from the OpenAPI specification.
+    ///
+    /// # Returns
+    ///
+    /// * `TraverseResult` - A Result containing either:
+    ///   * `Ok(Arc<Value>)` - An Arc pointer to the paths object if found
+    ///   * `Err(OpenApiValidationError)` - An error if the paths field is missing or reference resolution fails
     fn get_paths(&self) -> TraverseResult {
-        self.get(&self.specification, "paths")
+        self.get(&self.specification, Self::PATHS_FIELD)
     }
 
+    /// Retrieves the "parameters" field from the given operation object.
+    ///
+    /// # Arguments
+    ///
+    /// * `operation` - A reference to a JSON `Value` representing an OpenAPI operation object
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<Value>)` - An `Arc` pointer to the parameters JSON value if successful
+    /// * `Err(OpenApiValidationError)` - An error if the parameters field is missing or reference resolution fails
     fn get_request_parameters<'a>(&'a self, operation: &'a Value) -> TraverseResult {
-        self.get(operation, "parameters")
+        self.get(operation, Self::PARAMETERS_FIELD)
     }
 
+    /// Retrieves the security field from an operation object in an OpenAPI specification.
+    ///
+    /// # Arguments
+    ///
+    /// * `operation` - A reference to a JSON `Value` representing an operation object in an OpenAPI specification.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<Value>)` - An `Arc` pointer to the security field's value if it exists in the operation object.
+    /// * `Err(OpenApiValidationError)` - An error if the security field is missing or reference resolution fails.
     fn get_request_security(&self, operation: &Value) -> TraverseResult {
-        self.get(operation, "security")
+        self.get(operation, Self::SECURITY_FIELD)
     }
 
+    /// Retrieves a field from a JSON value, handling potential reference resolution.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - A reference to a JSON `Value` to get the field from. If this value contains a reference
+    ///   (i.e., a "$ref" field), the reference will be resolved first.
+    /// * `field` - The name of the field to retrieve from the value.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<Value>)` - An `Arc` pointer to the retrieved JSON value if successful
+    /// * `Err(OpenApiValidationError)` - An error if the field is missing or reference resolution fails
     fn get(&self, value: &Value, field: &str) -> TraverseResult {
-        self.check_for_ref(value)
-            .and_then(|val| Self::get_node(val.as_ref(), field))
+        self.check_for_ref(&value)
+            .and_then(|val| Self::get_node(&val, field))
     }
 
+    /// Retrieves a specific field from a JSON value.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The JSON value to extract a field from
+    /// * `field` - The name of the field to extract
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<Value>)` - An Arc-wrapped clone of the requested field's value if found
+    /// * `Err(OpenApiValidationError::FieldNotFound)` - If the specified field doesn't exist in the value
     fn get_node(value: &Value, field: &str) -> TraverseResult {
         match value.get(field) {
-            None => Err(OpenApiValidationError::RequiredFieldMissing(format!(
-                "Missing field '{}'",
-                field
-            ))),
+            None => Err(OpenApiValidationError::FieldNotFound(
+                String::from(field),
+                value.clone(),
+            )),
             Some(val) => Ok(Arc::new(val.clone())),
         }
     }
 
-    fn check_for_ref(&self, node: &Value) -> TraverseResult {
-        if let Some(ref_string) = node.get("$ref").and_then(|val| val.as_str()) {
+    /// Checks if a JSON node contains a "$ref" field and resolves it if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - A reference to a JSON Value node that might contain a "$ref" field
+    ///
+    /// # Returns
+    ///
+    /// * `TraverseResult` - Either:
+    ///   - `Ok(Arc<Value>)` with the resolved reference (if the node contains a "$ref")
+    ///     or the original node wrapped in an Arc (if no "$ref" is present)
+    ///   - `Err(OpenApiValidationError)` if reference resolution fails
+    fn check_for_ref<'a>(&'a self, node: &'a Value) -> TraverseResult {
+        // If the ref node exists, resolve it
+        if let Some(ref_string) = node.get(Self::REF_FIELD).and_then(|val| val.as_str()) {
             let entry = self.resolved_references.entry(String::from(ref_string));
             return match entry {
                 Entry::Occupied(e) => Ok(e.get().clone()),
@@ -547,6 +659,19 @@ impl OpenApiTraverser {
         Ok(Arc::new(node.clone()))
     }
 
+    /// Resolves a JSON reference path within an OpenAPI specification.
+    ///
+    /// # Arguments
+    ///
+    /// * `ref_string` - A string representing the JSON reference path to resolve (e.g., "/components/schemas/Pet")
+    /// * `seen_references` - A mutable HashSet that tracks references already processed to detect circular references
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Arc<Value>)` - An Arc-wrapped JSON Value representing the resolved reference
+    /// * `Err(OpenApiValidationError)` - An error if reference resolution fails due to:
+    ///   - Circular references
+    ///   - Missing fields in the path
     fn get_reference_path(
         &self,
         ref_string: &str,
@@ -559,20 +684,23 @@ impl OpenApiTraverser {
             )));
         }
         seen_references.insert(String::from(ref_string));
-        let path = ref_string.split("/");
+        let path = ref_string
+            .split(Self::PATH_SEPARATOR)
+            .filter(|node| !(*node).is_empty() && (*node != "#"))
+            .collect::<Vec<&str>>();
         let mut current_schema = &self.specification;
         for segment in path {
-
+            let refactored_segment = segment.replace(Self::ENCODED_BACKSLASH, Self::PATH_SEPARATOR);
             // Navigate to the next segment
-            match current_schema.get(segment) {
+            match current_schema.get(refactored_segment) {
                 Some(next) => {
                     current_schema = next;
                 }
                 None => {
-                    return Err(OpenApiValidationError::RequiredFieldMissing(format!(
-                        "Node missing field '{}'",
-                        segment
-                    )));
+                    return Err(OpenApiValidationError::FieldNotFound(
+                        String::from(segment),
+                        current_schema.clone(),
+                    ));
                 }
             }
         }
@@ -583,88 +711,88 @@ impl OpenApiTraverser {
         Ok(current_schema)
     }
 
-    // todo - make sure i dont need this before i delete
-//    fn get_reference_path(
-//        &self,
-//        ref_string: &str,
-//        seen_references: &mut HashSet<String>,
-//    ) -> TraverseResult {
-//        // Check for circular references
-//        if seen_references.contains(ref_string) {
-//            return Err(OpenApiValidationError::InvalidSchema(format!(
-//                "Circular reference found when resolving reference string '{}'",
-//                ref_string
-//            )));
-//        }
-//
-//        seen_references.insert(String::from(ref_string));
-//
-//        // Check if the reference is already in cache
-//        let entry = self.resolved_references.entry(String::from(ref_string));
-//        match entry {
-//            Entry::Occupied(e) => Ok(e.get().clone()),
-//            Entry::Vacant(_) => {
-//                let path = ref_string.split("/");
-//
-//                // Start with a reference to the specification and follow the path
-//                let mut current_schema = &self.specification;
-//                // This is to hold onto the results of any sub calls.
-//                let mut resolved_sub_reference: Arc<Value> = Arc::default();
-//
-//                for segment in path {
-//                    if segment == "#" {
-//                        continue;
-//                    }
-//
-//                    // Check if current node is itself a reference
-//                    if let Some(nested_ref) =
-//                        current_schema.get("$ref").and_then(|val| val.as_str())
-//                    {
-//                        if seen_references.contains(nested_ref) {
-//                            return Err(OpenApiValidationError::InvalidSchema(format!(
-//                                "Circular reference found when resolving nested reference '{}'",
-//                                nested_ref
-//                            )));
-//                        }
-//
-//                        // Resolve the nested reference
-//                        resolved_sub_reference =
-//                            self.get_reference_path(nested_ref, seen_references)?;
-//                        current_schema = &resolved_sub_reference;
-//                    }
-//
-//                    // Navigate to the next segment
-//                    match current_schema.get(segment) {
-//                        Some(next) => {
-//                            current_schema = next;
-//                        }
-//                        None => {
-//                            return Err(OpenApiValidationError::RequiredFieldMissing(format!(
-//                                "Node missing field '{}'",
-//                                segment
-//                            )));
-//                        }
-//                    }
-//                }
-//
-//                // Check if the final node is itself a reference
-//                if let Some(final_ref) = current_schema.get("$ref").and_then(|val| val.as_str()) {
-//                    let result = self.get_reference_path(final_ref, seen_references)?;
-//                    // Cache the result
-//                    self.resolved_references
-//                        .insert(String::from(ref_string), result.clone());
-//                    return Ok(result);
-//                }
-//
-//                let arc_result = Arc::new(current_schema.clone());
-//                // Cache the resolved reference
-//                self.resolved_references
-//                    .insert(String::from(ref_string), arc_result.clone());
-//
-//                Ok(arc_result)
-//            }
-//        }
-//    }
+// todo - make sure i dont need this before i delete
+    //    fn get_reference_path(
+    //        &self,
+    //        ref_string: &str,
+    //        seen_references: &mut HashSet<String>,
+    //    ) -> TraverseResult {
+    //        // Check for circular references
+    //        if seen_references.contains(ref_string) {
+    //            return Err(OpenApiValidationError::InvalidSchema(format!(
+    //                "Circular reference found when resolving reference string '{}'",
+    //                ref_string
+    //            )));
+    //        }
+    //
+    //        seen_references.insert(String::from(ref_string));
+    //
+    //        // Check if the reference is already in cache
+    //        let entry = self.resolved_references.entry(String::from(ref_string));
+    //        match entry {
+    //            Entry::Occupied(e) => Ok(e.get().clone()),
+    //            Entry::Vacant(_) => {
+    //                let path = ref_string.split("/");
+    //
+    //                // Start with a reference to the specification and follow the path
+    //                let mut current_schema = &self.specification;
+    //                // This is to hold onto the results of any sub calls.
+    //                let mut resolved_sub_reference: Arc<Value> = Arc::default();
+    //
+    //                for segment in path {
+    //                    if segment == "#" {
+    //                        continue;
+    //                    }
+    //
+    //                    // Check if current node is itself a reference
+    //                    if let Some(nested_ref) =
+    //                        current_schema.get("$ref").and_then(|val| val.as_str())
+    //                    {
+    //                        if seen_references.contains(nested_ref) {
+    //                            return Err(OpenApiValidationError::InvalidSchema(format!(
+    //                                "Circular reference found when resolving nested reference '{}'",
+    //                                nested_ref
+    //                            )));
+    //                        }
+    //
+    //                        // Resolve the nested reference
+    //                        resolved_sub_reference =
+    //                            self.get_reference_path(nested_ref, seen_references)?;
+    //                        current_schema = &resolved_sub_reference;
+    //                    }
+    //
+    //                    // Navigate to the next segment
+    //                    match current_schema.get(segment) {
+    //                        Some(next) => {
+    //                            current_schema = next;
+    //                        }
+    //                        None => {
+    //                            return Err(OpenApiValidationError::RequiredFieldMissing(format!(
+    //                                "Node missing field '{}'",
+    //                                segment
+    //                            )));
+    //                        }
+    //                    }
+    //                }
+    //
+    //                // Check if the final node is itself a reference
+    //                if let Some(final_ref) = current_schema.get("$ref").and_then(|val| val.as_str()) {
+    //                    let result = self.get_reference_path(final_ref, seen_references)?;
+    //                    // Cache the result
+    //                    self.resolved_references
+    //                        .insert(String::from(ref_string), result.clone());
+    //                    return Ok(result);
+    //                }
+    //
+    //                let arc_result = Arc::new(current_schema.clone());
+    //                // Cache the resolved reference
+    //                self.resolved_references
+    //                    .insert(String::from(ref_string), arc_result.clone());
+    //
+    //                Ok(arc_result)
+    //            }
+    //        }
+    //    }
 }
 
 #[derive(Debug)]
@@ -679,6 +807,7 @@ pub enum OpenApiValidationError {
     InvalidQueryParameters(String),
     InvalidHeaders(String),
     RequiredFieldMissing(String),
+    FieldNotFound(String, Value),
     InvalidRef(String),
     InvalidType(String),
 }
@@ -702,6 +831,11 @@ impl Display for OpenApiValidationError {
             OpenApiValidationError::RequiredFieldMissing(msg) => {
                 write!(f, "RequiredFieldMissing: {}", msg)
             }
+            OpenApiValidationError::FieldNotFound(field, node) => write!(
+                f,
+                "FieldNotFound: Object {} is missing field '{}'",
+                node, field
+            ),
             OpenApiValidationError::InvalidRef(msg) => write!(f, "InvalidRef: {}", msg),
             OpenApiValidationError::InvalidType(msg) => write!(f, "InvalidType: {}", msg),
         }
@@ -760,7 +894,9 @@ mod test {
         let validator = OpenApiValidator::new(specification, false).unwrap();
         print_memory();
         {
-            let result = validator.get_operation("/pet/findByStatus/MultipleExamples", "get");
+            let result = validator
+                .traverser
+                .get_operation("/pet/findByStatus/MultipleExamples", "get");
             assert!(result.is_ok());
             let result = result.unwrap();
             assert_eq!(
@@ -770,7 +906,9 @@ mod test {
         }
         print_memory();
         {
-            let result = validator.get_operation("/pet/findById/123", "get");
+            let result = validator
+                .traverser
+                .get_operation("/pet/findById/123", "get");
             assert!(result.is_ok());
             let result = result.unwrap();
             assert_eq!(
@@ -787,7 +925,8 @@ mod test {
         let specification: Value = serde_json::from_str(&spec_string).unwrap();
         let traverser = OpenApiTraverser::new(specification.clone());
         let validator = OpenApiValidator::new(specification, false).unwrap();
-        let result: (Arc<Value>, JsonPath) = validator.get_operation("/pet", "post").unwrap();
+        let result: (Arc<Value>, JsonPath) =
+            validator.traverser.get_operation("/pet", "post").unwrap();
         let operation = result.0.clone();
         assert!(operation.get("requestBody").is_some());
         let request_body = traverser.get_request_body(&result.0, "application/json");

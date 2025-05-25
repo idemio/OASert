@@ -697,6 +697,7 @@ dependencies = [
  "dashmap",
  "jsonschema",
  "memory-stats",
+ "serde",
  "serde_json",
  "unicase",
 ]
