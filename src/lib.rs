@@ -1,6 +1,4 @@
-mod openapi_v30x;
-mod openapi_v31x;
-mod openapi_common;
+pub mod openapi;
 
 use dashmap::{DashMap, Entry};
 use jsonschema::{Draft, Resource, ValidationError, ValidationOptions, Validator};
