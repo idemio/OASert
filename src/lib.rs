@@ -6,6 +6,8 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::Arc;
+use dashmap::DashMap;
 use unicase::UniCase;
 
 pub enum OpenApiVersion {
@@ -478,18 +480,16 @@ impl OpenApiValidator {
 }
 
 struct OpenApiTraverser {
-    // map of previously resolved references
-    // TODO - make use of this
-    _resolved_references: HashMap<String, Value>,
-    // spec to traverse over
     specification: Value,
+    // Add a DashMap to cache resolved references
+    resolved_references: DashMap<String, Arc<Value>>,
 }
 
 impl OpenApiTraverser {
     fn new(specification: Value) -> Self {
         Self {
-            _resolved_references: HashMap::new(),
             specification,
+            resolved_references: DashMap::new(),
         }
     }
 
@@ -498,39 +498,36 @@ impl OpenApiTraverser {
         operation: &'a Value,
         content_type: &'a str,
     ) -> Result<&'a Value, OpenApiValidationError> {
-        Self::get(&self.specification, operation, "requestBody")
-            .and_then(|node| Self::get(&self.specification, node, "content"))
-            .and_then(|node| Self::get(&self.specification, node, content_type))
-            .and_then(|node| Self::get(&self.specification, node, "schema"))
+        self.get(operation, "requestBody")
+            .and_then(|node| self.get(node, "content"))
+            .and_then(|node| self.get(node, content_type))
+            .and_then(|node| self.get(node, "schema"))
     }
 
     fn get_paths<'a>(&self) -> Result<&Map<String, Value>, OpenApiValidationError> {
-        Self::get_as_map(&self.specification, &self.specification, "paths")
+        self.get_as_map(&self.specification, "paths")
     }
 
     fn get_request_parameters<'a>(
         &'a self,
         operation: &'a Value,
     ) -> Result<&'a Vec<Value>, OpenApiValidationError> {
-        Self::get_as_array(&self.specification, operation, "parameters")
+        self.get_as_array(operation, "parameters")
     }
 
     fn get_request_security<'a>(
         &'a self,
         operation: &'a Value,
     ) -> Result<&'a Vec<Value>, OpenApiValidationError> {
-        Self::get_as_array(&self.specification, operation, "security")
+        self.get_as_array(operation, "security")
     }
 
     fn get_as_map<'a>(
-        specification: &'a Value,
+        &'a self,
         value: &'a Value,
         field: &'a str,
     ) -> Result<&'a Map<String, Value>, OpenApiValidationError> {
-        let node = match Self::get(specification, value, field) {
-            Ok(node) => node,
-            Err(e) => return Err(e),
-        };
+        let node = self.get(value, field)?;
         match node.as_object() {
             None => Err(OpenApiValidationError::InvalidType(format!(
                 "Value '{field}' is not a map type"
@@ -540,14 +537,11 @@ impl OpenApiTraverser {
     }
 
     fn get_as_array<'a>(
-        specification: &'a Value,
+        &'a self,
         value: &'a Value,
         field: &'a str,
     ) -> Result<&'a Vec<Value>, OpenApiValidationError> {
-        let node = match Self::get(specification, value, field) {
-            Ok(node) => node,
-            Err(e) => return Err(e),
-        };
+        let node = self.get(value, field)?;
         match node.as_array() {
             None => Err(OpenApiValidationError::InvalidType(format!(
                 "Value '{node}' is not an array type"
@@ -557,11 +551,11 @@ impl OpenApiTraverser {
     }
 
     fn get<'a>(
-        specification: &'a Value,
+        &'a self,
         value: &'a Value,
         field: &'a str,
     ) -> Result<&'a Value, OpenApiValidationError> {
-        Self::check_for_ref(specification, value).and_then(|val| Self::get_node(val, field))
+        self.check_for_ref(value).and_then(|val| Self::get_node(val, field))
     }
 
     fn get_node<'a>(value: &'a Value, field: &'a str) -> Result<&'a Value, OpenApiValidationError> {
@@ -573,34 +567,74 @@ impl OpenApiTraverser {
         }
     }
 
+    fn check_for_ref<'a>(
+        &'a self,
+        node: &'a Value,
+    ) -> Result<&'a Value, OpenApiValidationError> {
+        if let Some(ref_string) = node.get("$ref").and_then(|val| val.as_str()) {
+            let mut seen_references = HashSet::new();
+            return self.get_reference_path(ref_string, &mut seen_references);
+        }
+        Ok(node)
+    }
+
     fn get_reference_path<'a>(
-        specification: &'a Value,
-        value: &'a Value,
+        &'a self,
         ref_string: &'a str,
         seen_references: &mut HashSet<String>,
     ) -> Result<&'a Value, OpenApiValidationError> {
+        // Check for circular references
+        if seen_references.contains(ref_string) {
+            return Err(OpenApiValidationError::InvalidSchema(format!(
+                "Circular reference found when resolving reference string '{}'",
+                ref_string
+            )));
+        }
+
+        seen_references.insert(ref_string.to_string());
         let path = ref_string.split("/").collect::<Vec<&str>>();
-        let mut current_value = value;
-        let mut seen_references = seen_references;
+
+        let mut current_value = &self.specification;
+
         for index in 0..path.len() {
-            if let Some(ref_map_value) = current_value.get("$ref").and_then(|val| val.as_str()) {
-                if seen_references.contains(ref_map_value) {
+            // Check if current node is itself a reference
+            if let Some(nested_ref) = current_value.get("$ref").and_then(|val| val.as_str()) {
+                if seen_references.contains(nested_ref) {
                     return Err(OpenApiValidationError::InvalidSchema(format!(
-                        "Circular reference found when resolving reference string '{}'",
-                        ref_string
+                        "Circular reference found when resolving nested reference '{}'",
+                        nested_ref
                     )));
                 }
-                match Self::get_reference_path(
-                    specification,
-                    current_value,
-                    ref_map_value,
-                    &mut seen_references,
-                ) {
-                    Ok(resolved) => {
-                        seen_references.insert(ref_map_value.to_string());
-                        current_value = resolved
+
+                // Check if nested reference is in cache
+                if let Some(entry) = self.resolved_references.get(nested_ref) {
+                    // SAFETY: We're using mem::transmute to ensure the value outlives this function
+                    let resolved: &'a Value = unsafe {
+                        std::mem::transmute::<&Value, &'a Value>(entry.value().as_ref())
+                    };
+                    current_value = resolved;
+                } else {
+                    match self.get_reference_path(
+                        //current_value,
+                        nested_ref,
+                        seen_references,
+                    ) {
+                        Ok(resolved) => {
+
+                            // Cache the resolved nested reference
+                            let resolved_clone = resolved.clone();
+                            let arc_value = Arc::new(resolved_clone);
+                            self.resolved_references.insert(nested_ref.to_string(), arc_value.clone());
+
+                            // SAFETY: We're using mem::transmute to ensure the value outlives this function
+                            let stored_value: &'a Value = unsafe {
+                                std::mem::transmute::<&Value, &'a Value>(arc_value.as_ref())
+                            };
+
+                            current_value = stored_value;
+                        }
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => return Err(e),
                 }
             }
 
@@ -625,23 +659,13 @@ impl OpenApiTraverser {
                 )));
             }
         }
-        Ok(current_value)
-    }
 
-    fn check_for_ref<'a>(
-        specification: &'a Value,
-        node: &'a Value,
-    ) -> Result<&'a Value, OpenApiValidationError> {
-        if let Some(ref_string) = node.get("$ref").and_then(|val| val.as_str()) {
-            let mut seen_references = HashSet::new();
-            return Self::get_reference_path(
-                &specification,
-                &node,
-                ref_string,
-                &mut seen_references,
-            );
+        // Check if the final node is itself a reference
+        if current_value.get("$ref").is_some() {
+            return self.check_for_ref(current_value);
         }
-        Ok(node)
+
+        Ok(current_value)
     }
 }
 
