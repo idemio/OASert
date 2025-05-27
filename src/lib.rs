@@ -16,10 +16,12 @@ const PARAMETERS_FIELD: &'static str = "parameters";
 const REF_FIELD: &'static str = "$ref";
 const SECURITY_FIELD: &'static str = "security";
 const PATH_SEPARATOR: &'static str = "/";
+const TILDE: &'static str = "~";
 const ENCODED_BACKSLASH: &'static str = "~1";
+const ENCODED_TILDE: &'static str = "~0";
 const NAME_FIELD: &'static str = "name";
 const OPENAPI_FIELD: &'static str = "openapi";
-const REQUIRED_FIELD: &'static str = "openapi";
+const REQUIRED_FIELD: &'static str = "required";
 
 pub enum OpenApiVersion {
     V30x,
@@ -27,7 +29,7 @@ pub enum OpenApiVersion {
 }
 
 impl FromStr for OpenApiVersion {
-    type Err = PayloadValidationError;
+    type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with("3.1") {
@@ -35,10 +37,7 @@ impl FromStr for OpenApiVersion {
         } else if s.starts_with("3.0") {
             Ok(OpenApiVersion::V30x)
         } else {
-            Err(PayloadValidationError::InvalidSchema(format!(
-                "Provided version '{}' does not match either 3.1.x or 3.0.x",
-                s
-            )))
+            Err(ValidationError::UnsupportedSpecVersion(s.to_string()))
         }
     }
 }
@@ -52,28 +51,24 @@ impl OpenApiVersion {
     }
 }
 
-fn serde_vec_2_string(vec: &Vec<Value>) -> String {
-    let mut out = String::new();
-    out.push_str("[");
-    let mut index = 0;
-    for el in vec {
-        out.push_str(&el.to_string());
-        if index + 1 < vec.len() {
-            out.push_str(", ");
-        }
-        index += 1;
+fn serde_get_type(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "object",
+        Value::Array(_) => "array",
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Null => "null",
     }
-    out.push_str("]");
-    out
 }
 
-struct OpenApiPayloadValidator {
+pub struct OpenApiPayloadValidator {
     traverser: OpenApiTraverser,
     validator_options: ValidationOptions,
 }
 
 impl OpenApiPayloadValidator {
-    fn new(mut value: Value) -> Result<Self, PayloadValidationError> {
+    pub fn new(mut value: Value) -> Result<Self, ValidationError> {
         // Assign ID for schema validation in the future.
         value["$id"] = json!("@@root");
 
@@ -86,10 +81,8 @@ impl OpenApiPayloadValidator {
         // Create this resource once and re-use it for multiple validation calls.
         let resource = match Resource::from_contents(value.clone()) {
             Ok(res) => res,
-            Err(_) => {
-                return Err(PayloadValidationError::InvalidSchema(
-                    "Invalid specification provided!".to_string(),
-                ));
+            Err(e) => {
+                return Err(ValidationError::SchemaValidationFailed(e.to_string()));
             }
         };
 
@@ -104,9 +97,15 @@ impl OpenApiPayloadValidator {
         })
     }
 
-    fn get_version_from_spec(
-        specification: &Value,
-    ) -> Result<OpenApiVersion, PayloadValidationError> {
+    /// Extracts the OpenAPI version from a specification document.
+    ///
+    /// # Arguments
+    /// * `specification` - A reference to a JSON Value containing the OpenAPI specification document
+    ///
+    /// # Returns
+    /// * `Ok(OpenApiVersion)` - The parsed OpenAPI version (either V30x or V31x)
+    /// * `Err(ValidationError)` - If the "openapi" field is missing or contains an unsupported version
+    fn get_version_from_spec(specification: &Value) -> Result<OpenApiVersion, ValidationError> {
         // Find the openapi field and grab the version. It should follow either 3.1.x or 3.0.x.
         if let Some(version) = specification
             .get(OPENAPI_FIELD)
@@ -118,17 +117,34 @@ impl OpenApiPayloadValidator {
             };
         }
 
-        Err(PayloadValidationError::InvalidSchema(
-            "Provided spec does not contain 'openapi' field".to_string(),
+        Err(ValidationError::FieldMissing(
+            OPENAPI_FIELD.to_string(),
+            specification.clone(),
         ))
     }
 
+    /// Validates a request body against a schema definition.
+    ///
+    /// This function performs a two-step validation process:
+    /// 1. Checks that all required fields specified in the schema are present in the request body
+    /// 2. If a request body is provided, performs complex schema validation on its content
+    ///
+    /// # Arguments
+    /// * `request_body_path` - A JsonPath reference pointing to the schema definition in the specification
+    /// * `request_schema` - The JSON schema to validate against, which may contain required field definitions
+    /// * `request_body` - An optional JSON value representing the request body to validate
+    ///
+    /// # Returns
+    /// * `Ok(())` - If validation succeeds
+    /// * `Err(ValidationError::ValueExpected)` - If required fields are defined but, request body is missing
+    /// * `Err(ValidationError::RequiredPropertyMissing)` - If a specific required field is missing
+    /// * `Err(ValidationError::SchemaValidationFailed)` - If complex schema validation fails
     fn validate_body(
         &self,
         request_body_path: &JsonPath,
         request_schema: &Value,
         request_body: Option<&Value>,
-    ) -> Result<(), PayloadValidationError> {
+    ) -> Result<(), ValidationError> {
         if let Err(e) = self.check_required_body(request_schema, request_body) {
             return Err(e);
         }
@@ -140,50 +156,189 @@ impl OpenApiPayloadValidator {
         Ok(())
     }
 
+    /// Validates that required fields in a JSON schema are present in the request body.
+    ///
+    /// # Arguments
+    ///
+    /// * `body_schema` - A JSON schema that may contain a "required" field listing required properties
+    /// * `request_body` - An optional JSON value representing the request body to validate
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all required fields are present in the request body
+    /// * `Err(ValidationError::ValueExpected)` - If required fields are defined but the request body is missing
+    /// * `Err(ValidationError::RequiredPropertyMissing)` - If a specific required field is missing from the request body
     fn check_required_body(
         &self,
         body_schema: &Value,
         request_body: Option<&Value>,
-    ) -> Result<(), PayloadValidationError> {
+    ) -> Result<(), ValidationError> {
         if let Some(required_fields) = body_schema
             .get(REQUIRED_FIELD)
             .and_then(|required| required.as_array())
         {
             if !required_fields.is_empty() && request_body.is_none() {
-                return Err(PayloadValidationError::InvalidRequest(format!(
-                    "Request schema contains required fields {} but provided request is empty.",
-                    serde_vec_2_string(required_fields)
-                )));
+                return Err(ValidationError::ValueExpected("request body".to_string()));
             }
 
             for required in required_fields {
                 let required_field = required.as_str().unwrap();
 
                 if request_body.is_some_and(|body| body.get(required_field).is_none()) {
-                    return Err(PayloadValidationError::InvalidRequest(format!(
-                        "Request body missing required field '{}'",
-                        required_field
-                    )));
+                    return Err(ValidationError::RequiredPropertyMissing(
+                        required_field.to_string(),
+                        request_body.unwrap().clone(),
+                    ));
                 }
             }
         }
         Ok(())
     }
 
-    fn validate_headers(
+    /// Validates an instance value against a JSON schema.
+    ///
+    /// This function checks if the provided instance conforms to the specified JSON schema
+    /// by using the jsonschema crate's validation functionality.
+    ///
+    /// # Arguments
+    ///
+    /// * `schema` - A reference to a Value representing a JSON schema to validate against
+    /// * `instance` - A reference to a Value representing the JSON instance to validate
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the instance successfully validates against the schema
+    /// * `Err(ValidationError::SchemaValidationFailed)` - If validation fails, containing the error message
+    fn simple_validation(schema: &Value, instance: &Value) -> Result<(), ValidationError> {
+        if let Err(e) = jsonschema::validate(schema, instance) {
+            return Err(ValidationError::SchemaValidationFailed(e.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Validates a JSON instance against a schema referenced by a JSON path.
+    ///
+    /// # Arguments
+    /// * `json_path` - A reference to a JsonPath that points to a schema definition in the specification
+    /// * `instance` - A reference to the JSON Value to validate against the referenced schema
+    ///
+    /// # Returns
+    /// * `Ok(())` - If validation succeeds
+    /// * `Err(ValidationError::SchemaValidationFailed)` - If schema building fails, or validation fails
+    fn complex_validation(
+        &self,
+        json_path: &JsonPath,
+        instance: &Value,
+    ) -> Result<(), ValidationError> {
+        let full_pointer_path = format!("@@root#/{}", json_path.format_path());
+        let schema = json!({
+            REF_FIELD: full_pointer_path
+        });
+
+        let validator = match self.validator_options.build(&schema) {
+            Ok(val) => val,
+            Err(e) => {
+                return Err(ValidationError::SchemaValidationFailed(e.to_string()));
+            }
+        };
+
+        match validator.validate(instance) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(ValidationError::SchemaValidationFailed(e.to_string())),
+        }
+    }
+
+    /// Validates that all required parameters are present in the request.
+    ///
+    /// # Arguments
+    ///
+    /// * `param_schemas` - A JSON Value containing an array of parameter schemas to validate against.
+    /// * `request_params` - An optional HashMap containing the actual request parameters where keys are
+    ///   case-insensitive parameter names and values are the parameter values.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all required parameters are present in the request.
+    /// * `Err(ValidationError::FieldMissing)` - If a parameter schema is missing a required field.
+    /// * `Err(ValidationError::RequiredParameterMissing)` - If a required parameter is missing from the request.
+    fn check_required_params(
         &self,
         param_schemas: &Value,
-        headers: Option<&HashMap<UniCase<String>, String>>,
-    ) -> Result<(), PayloadValidationError> {
-        if let Err(e) = self.check_required_params(param_schemas, headers) {
-            return Err(e);
+        request_params: Option<&HashMap<UniCase<String>, String>>,
+    ) -> Result<(), ValidationError> {
+        if let (Some(request_params), Some(param_schemas)) =
+            (request_params, param_schemas.as_array())
+        {
+            for param in param_schemas {
+                let param_name = match param.get(NAME_FIELD).and_then(|name| name.as_str()) {
+                    Some(x) => x,
+                    None => {
+                        return Err(ValidationError::FieldMissing(
+                            NAME_FIELD.to_string(),
+                            param.clone(),
+                        ));
+                    }
+                };
+                let section = match param.get("in").and_then(|name| name.as_str()) {
+                    Some(x) => x,
+                    None => {
+                        return Err(ValidationError::FieldMissing(
+                            "in".to_string(),
+                            param.clone(),
+                        ));
+                    }
+                };
+                let param_required = param
+                    .get(REQUIRED_FIELD)
+                    .and_then(|required| required.as_bool())
+                    .unwrap_or(false);
+                if !request_params.contains_key(&UniCase::<String>::from(param_name))
+                    && param_required
+                {
+                    return Err(ValidationError::RequiredParameterMissing(
+                        param_name.to_string(),
+                        section.to_string(),
+                    ));
+                }
+            }
         }
 
+        Ok(())
+    }
+
+    /// Validates parameters based on their schemas and section.
+    ///
+    /// This function checks if the provided request parameters conform to their respective schemas
+    /// in a specified section of an OpenAPI document. It validates each parameter by:
+    /// 1. Checking if the parameter belongs to the specified section
+    /// 2. Verifying if required parameters are present
+    /// 3. Validating parameter values against their schemas
+    ///
+    /// # Arguments
+    ///
+    /// * `param_schemas` - JSON Value containing an array of parameter schemas to validate against
+    /// * `request_params` - Optional HashMap of request parameters where keys are case-insensitive parameter names
+    ///                      and values are the parameter values as strings
+    /// * `section` - String specifying which section of parameters to validate (e.g., "path", "query", "header")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all parameters pass validation
+    /// * `Err(ValidationError)` - If validation fails, with specific error details:
+    ///   - `ValidationError::FieldMissing` - When a required schema field is missing
+    ///   - `ValidationError::RequiredParameterMissing` - When a required parameter is not provided
+    ///   - `ValidationError::SchemaValidationFailed` - When a parameter value fails schema validation
+    fn validate_params(
+        &self,
+        param_schemas: &Value,
+        request_params: Option<&HashMap<UniCase<String>, String>>,
+        section: &str,
+    ) -> Result<(), ValidationError> {
         if let Some(param_schemas) = param_schemas.as_array() {
             for param in param_schemas {
                 if param
                     .get("in")
-                    .is_some_and(|param| param.as_str().is_some_and(|param| param == "header"))
+                    .is_some_and(|param| param.as_str().is_some_and(|param| param == section))
                 {
                     let is_required = param
                         .get(REQUIRED_FIELD)
@@ -193,7 +348,7 @@ impl OpenApiPayloadValidator {
                     let name = match param.get(NAME_FIELD).and_then(|name| name.as_str()) {
                         Some(x) => x,
                         None => {
-                            return Err(PayloadValidationError::FieldMissing(
+                            return Err(ValidationError::FieldMissing(
                                 String::from(NAME_FIELD),
                                 param.clone(),
                             ));
@@ -202,20 +357,26 @@ impl OpenApiPayloadValidator {
 
                     let schema = match param.get(SCHEMA_FIELD) {
                         Some(x) => x,
-                        None => todo!(),
+                        None => {
+                            return Err(ValidationError::FieldMissing(
+                                String::from(SCHEMA_FIELD),
+                                param.clone(),
+                            ));
+                        }
                     };
 
-                    if let Some(header_value) =
-                        headers.and_then(|headers| headers.get(&UniCase::<String>::from(name)))
-                    {
-                        if let Err(e) = Self::simple_validation(schema, &json!(header_value)) {
+                    if let Some(request_param_value) = request_params.and_then(|request_params| {
+                        request_params.get(&UniCase::<String>::from(name))
+                    }) {
+                        if let Err(e) = Self::simple_validation(schema, &json!(request_param_value))
+                        {
                             return Err(e);
                         }
                     } else if is_required {
-                        return Err(PayloadValidationError::InvalidHeaders(format!(
-                            "Missing request header: '{}'",
-                            name
-                        )));
+                        return Err(ValidationError::RequiredParameterMissing(
+                            name.to_string(),
+                            section.to_string(),
+                        ));
                     }
                 }
             }
@@ -223,82 +384,61 @@ impl OpenApiPayloadValidator {
         Ok(())
     }
 
-    fn simple_validation(schema: &Value, instance: &Value) -> Result<(), PayloadValidationError> {
-        if let Err(e) = jsonschema::validate(schema, instance) {
-            return Err(PayloadValidationError::InvalidSchema(format!(
-                "Validation failed: {}",
-                e.to_string()
-            )));
-        }
-        Ok(())
-    }
-
-    fn complex_validation(
-        &self,
-        json_path: &JsonPath,
-        instance: &Value,
-    ) -> Result<(), PayloadValidationError> {
-        let full_pointer_path = format!("@@root#/{}", json_path.format_path());
-        let schema = json!({
-            REF_FIELD: full_pointer_path
-        });
-
-        let validator = match self.validator_options.build(&schema) {
-            Ok(val) => val,
-            Err(_) => {
-                return Err(PayloadValidationError::InvalidSchema(format!(
-                    "Could not construct validator for json_path {}",
-                    json_path.format_path()
-                )));
-            }
-        };
-
-        match validator.validate(instance) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(PayloadValidationError::InvalidRequest(format!(
-                "Schema validation failed: {}",
-                e.to_string()
-            ))),
-        }
-    }
-
-    fn check_required_params(
-        &self,
-        param_schemas: &Value,
-        request_params: Option<&HashMap<UniCase<String>, String>>,
-    ) -> Result<(), PayloadValidationError> {
-        if let (Some(headers), Some(param_schemas)) = (request_params, param_schemas.as_array()) {
-            for param in param_schemas {
-                let param_name = param
-                    .get(NAME_FIELD)
-                    .and_then(|name| name.as_str())
-                    .unwrap();
-                let section = param.get("in").and_then(|name| name.as_str()).unwrap();
-                let param_required = param
-                    .get(REQUIRED_FIELD)
-                    .and_then(|required| required.as_bool())
-                    .unwrap_or(false);
-
-                if !headers.contains_key(&UniCase::<String>::from(param_name)) && param_required {
-                    return Err(PayloadValidationError::InvalidRequest(format!(
-                        "Request {} param missing '{}' ",
-                        section, param_name
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
+    /// Validates query parameters against their schema definitions.
+    ///
+    /// This function performs validation of query parameters in two steps:
+    /// 1. Checks that all required parameters are present in the request
+    /// 2. Validates that parameter values conform to their respective schemas
+    ///
+    /// # Arguments
+    ///
+    /// * `param_schemas` - A JSON Value containing an array of parameter schemas to validate against
+    /// * `query_params` - An optional HashMap containing the query parameters where keys are
+    ///   case-insensitive parameter names and values are the parameter values as strings
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all query parameters pass validation
+    /// * `Err(ValidationError)` - If validation fails, with specific details about the validation error
     fn validate_query_params(
         &self,
-        request_params: &Value,
+        param_schemas: &Value,
         query_params: Option<&HashMap<UniCase<String>, String>>,
-    ) -> Result<(), PayloadValidationError> {
-        if let Err(e) = self.check_required_params(request_params, query_params) {
+    ) -> Result<(), ValidationError> {
+        if let Err(e) = self.check_required_params(param_schemas, query_params) {
             return Err(e);
         }
-        Ok(())
+        self.validate_params(param_schemas, query_params, "query")
+    }
+
+    /// Validates HTTP header parameters against their schema definitions.
+    ///
+    /// This function performs header parameter validation in two steps:
+    /// 1. Checks that all required header parameters are present
+    /// 2. Validates each header parameter against its schema definition
+    ///
+    /// # Arguments
+    ///
+    /// * `param_schemas` - JSON Value containing an array of parameter schemas for validation
+    /// * `headers` - Optional HashMap of request headers where keys are case-insensitive header names
+    ///               and values are the header values as strings
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all header parameters pass validation
+    /// * `Err(ValidationError)` - If validation fails, with specific error information such as
+    ///   - Missing required parameters
+    ///   - Schema validation failures
+    ///   - Missing required fields in parameter definitions
+    fn validate_header_params(
+        &self,
+        param_schemas: &Value,
+        headers: Option<&HashMap<UniCase<String>, String>>,
+    ) -> Result<(), ValidationError> {
+        if let Err(e) = self.check_required_params(param_schemas, headers) {
+            return Err(e);
+        }
+        self.validate_params(param_schemas, headers, "header")
     }
 
     fn extract_content_type(headers: Option<&HashMap<UniCase<String>, String>>) -> Option<&str> {
@@ -311,6 +451,162 @@ impl OpenApiPayloadValidator {
         None
     }
 
+    /// # Validates a request body against an OpenAPI schema
+    ///
+    /// This function validates a request body against the schema defined in an OpenAPI specification.
+    /// It extracts the content type from the request headers, locates the corresponding schema
+    /// in the OpenAPI spec, and performs validation against that schema.
+    ///
+    /// ## Arguments
+    ///
+    /// * `operation_and_path` - A tuple containing:
+    ///   * A reference to a JSON Value representing an OpenAPI operation object
+    ///   * A JsonPath object used to track the path within the OpenAPI spec
+    /// * `body` - The JSON Value representing the request body to validate
+    /// * `headers` - A HashMap of request headers where keys are case-insensitive header names
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(())` - If the request body is valid, according to the schema
+    /// * `Err(ValidationError::RequiredParameterMissing)` - If the content-type header is missing
+    /// * `Err(ValidationError::DefinitionExpected)` - If the schema for the request body is missing
+    /// * `Err(ValidationError)` - Other validation errors (missing required properties, schema validation failures)
+    ///
+    /// ## Implementation Details
+    ///
+    /// 1. Extracts the content type from the request headers
+    /// 2. Builds a path to the schema for the given content type
+    /// 3. Traverses the OpenAPI spec to find the request body schema:
+    ///    - Gets the optional request body object
+    ///    - Gets the required content object
+    ///    - Gets the required media type object for the content type
+    ///    - Gets the optional schema from media-type
+    /// 4. Validates the request body against the schema:
+    ///    - Checks that required properties are present
+    ///    - Performs complex schema validation
+    /// 5. Returns an error if any step of the validation fails
+    pub fn validate_request_body(
+        &self,
+        operation_and_path: (&Value, JsonPath),
+        body: &Value,
+        headers: &HashMap<UniCase<String>, String>,
+    ) -> Result<(), ValidationError> {
+        let (operation, mut path) = operation_and_path;
+        if let Some(content_type) = Self::extract_content_type(Some(headers)) {
+            path.add_segment(REQUEST_BODY_FIELD)
+                .add_segment(CONTENT_FIELD)
+                .add_segment(content_type)
+                .add_segment(SCHEMA_FIELD);
+
+            let request_body_schema = match self
+                .traverser
+                .get_optional_spec_node(&operation, REQUEST_BODY_FIELD)?
+            {
+                None => return Ok(()),
+                Some(val) => val,
+            };
+
+            let content_schema = match self
+                .traverser
+                .get_required_spec_node(request_body_schema.value(), CONTENT_FIELD)
+            {
+                Ok(val) => val,
+                Err(e) => return Err(e),
+            };
+
+            let media_type = self
+                .traverser
+                .get_required_spec_node(content_schema.value(), content_type)?;
+            let request_media_type_schema = self
+                .traverser
+                .get_optional_spec_node(media_type.value(), SCHEMA_FIELD)?;
+
+            match request_media_type_schema {
+                Some(request_body_schema) => {
+                    if let Err(e) =
+                        self.check_required_body(request_body_schema.value(), Some(body))
+                    {
+                        return Err(e);
+                    }
+                    self.complex_validation(&path, body)
+                }
+
+                None => Err(ValidationError::DefinitionExpected(
+                    "request body".to_string(),
+                )),
+            }
+        } else {
+            Err(ValidationError::RequiredParameterMissing(
+                "content-type".to_string(),
+                "header".to_string(),
+            ))
+        }
+    }
+
+    /// # Validates an HTTP request against an OpenAPI specification
+    ///
+    /// Verifies that an incoming HTTP request conforms to the requirements
+    /// defined in an OpenAPI specification by validating:
+    /// - Request body against the schema definition
+    /// - Request headers against parameter specifications
+    /// - Query parameters against parameter specifications
+    ///
+    /// ## Arguments
+    ///
+    /// * `path` - The URL path of the request to validate
+    /// * `method` - The HTTP method of the request (GET, POST, etc.)
+    /// * `body` - Optional JSON body content of the request
+    /// * `headers` - Optional map of request headers, case-insensitive
+    /// * `query_params` - Optional map of query parameters, case-insensitive
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(())` - If the request is valid, according to the specification
+    /// * `Err(ValidationError)` - If validation fails, with details about the specific error:
+    ///   - `ValidationError::MissingOperation` - If the path/method combination is not found
+    ///   - `ValidationError::DefinitionExpected` - If required schema definitions are missing
+    ///   - `ValidationError::RequiredParameterMissing` - If a required parameter is not provided
+    ///   - Other validation errors as defined in the `ValidationError` enum
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use std::collections::HashMap;
+    /// use std::fs;
+    /// use serde_json::Value;
+    /// use unicase::UniCase;
+    /// use crate::oasert::OpenApiPayloadValidator;
+    ///
+    /// let spec_string = fs::read_to_string("./test/openapi-v3.0.2.json").unwrap();
+    /// let specification: Value = serde_json::from_str(&spec_string).unwrap();
+    /// let validator = OpenApiPayloadValidator::new(specification).unwrap();
+    /// let headers = Some(HashMap::from([
+    ///     (UniCase::from("content-type".to_string()), "application/json".to_string())
+    /// ]));
+    /// let body = Some(serde_json::json!({"name": "Test User", "email": "test@example.com"}));
+    ///
+    /// match validator.validate_request("/users", "POST", body.as_ref(), headers.as_ref(), None) {
+    ///     Ok(()) => println!("Request is valid!"),
+    ///     Err(e) => println!("Validation error: {:?}", e),
+    /// }
+    /// ```
+    ///
+    /// ## Implementation Details
+    ///
+    /// The function follows these steps:
+    /// 1. Retrieves the operation object from the OpenAPI spec using `path` and `method`
+    /// 2. If Content-Type header is present:
+    ///    - Builds a path to the schema for the specified content type
+    ///    - Retrieves and validates the request body schema if it exists
+    /// 3. Validates all header parameters against the spec:
+    ///    - Checks that required headers are present
+    ///    - Validates header values against their schemas
+    /// 4. Validates all query parameters against the spec:
+    ///    - Checks that required query parameters are present
+    ///    - Validates query parameter values against their schemas
+    ///
+    /// The validation logic handles the case where elements are optional in both
+    /// the request and the specification.
     pub fn validate_request(
         &self,
         path: &str,
@@ -318,44 +614,68 @@ impl OpenApiPayloadValidator {
         body: Option<&Value>,
         headers: Option<&HashMap<UniCase<String>, String>>,
         query_params: Option<&HashMap<UniCase<String>, String>>,
-    ) -> Result<(), PayloadValidationError> {
+    ) -> Result<(), ValidationError> {
         let (operation, mut path) = match self.traverser.get_operation(path, method) {
             Err(e) => return Err(e),
             Ok(val) => (val.0, val.1),
         };
 
-        let request_schema = match Self::extract_content_type(headers) {
-            None => None,
-            Some(content_type) => {
+        let result: Result<(), ValidationError> = {
+            if let Some(content_type) = Self::extract_content_type(headers) {
                 path.add_segment(REQUEST_BODY_FIELD)
                     .add_segment(CONTENT_FIELD)
                     .add_segment(content_type)
                     .add_segment(SCHEMA_FIELD);
-                self.traverser
-                    .get_request_body(&operation, content_type)
-                    .unwrap_or_else(|_| None)
+
+                let request_body_schema = match self
+                    .traverser
+                    .get_optional_spec_node(&operation, REQUEST_BODY_FIELD)?
+                {
+                    None => return Ok(()),
+                    Some(val) => val,
+                };
+
+                let content_schema = match self
+                    .traverser
+                    .get_required_spec_node(request_body_schema.value(), CONTENT_FIELD)
+                {
+                    Ok(val) => val,
+                    Err(e) => return Err(e),
+                };
+
+                let media_type = self
+                    .traverser
+                    .get_required_spec_node(content_schema.value(), content_type)?;
+                let request_media_type_schema = self
+                    .traverser
+                    .get_optional_spec_node(media_type.value(), SCHEMA_FIELD)?;
+
+                return match (body.is_some(), request_media_type_schema) {
+                    (true, Some(request_body_schema)) => {
+                        self.validate_body(&path, &request_body_schema.value(), body)
+                    }
+
+                    (true, None) => Err(ValidationError::DefinitionExpected(
+                        "request body".to_string(),
+                    )),
+
+                    (_, _) => Ok(()),
+                };
             }
+            Ok(())
         };
 
-        let spec_parameters = self.traverser.get_request_parameters(&operation)?;
-
-        if let Err(e) = match (body.is_some(), request_schema) {
-            (true, Some(request_body_schema)) => {
-                self.validate_body(&path, &request_body_schema.value(), body)
-            }
-
-            (true, None) => Err(PayloadValidationError::InvalidRequest(
-                "Request body provided when endpoint has no request schema defined".to_string(),
-            )),
-
-            (_, _) => Ok(()),
-        } {
+        if let Err(e) = result {
             return Err(e);
         }
 
+        let spec_parameters = self.traverser.get_request_parameters(&operation)?;
+
         if let Err(e) = match (headers.is_some(), &spec_parameters) {
             // if we have header params in our request and the spec contains params, do the validation.
-            (true, Some(request_params)) => self.validate_headers(&request_params.value(), headers),
+            (true, Some(request_params)) => {
+                self.validate_header_params(&request_params.value(), headers)
+            }
 
             // If no header params were provided and the spec contains params,
             // check to see if there are any required header params.
@@ -382,8 +702,8 @@ impl OpenApiPayloadValidator {
             }
 
             // If query params were provided, but the spec contains no param definitions, raise a validation error.
-            (true, None) => Err(PayloadValidationError::InvalidRequest(
-                "Query parameters provided when endpoint has no parameters defined".to_string(),
+            (true, None) => Err(ValidationError::DefinitionExpected(
+                "query parameters".to_string(),
             )),
 
             // passthrough
@@ -396,8 +716,7 @@ impl OpenApiPayloadValidator {
     }
 }
 
-//type TraverseResult = Result<Arc<Value>, PayloadValidationError>;
-type TraverseResult<'a> = Result<SearchResult<'a>, PayloadValidationError>;
+type TraverseResult<'a> = Result<SearchResult<'a>, ValidationError>;
 
 pub enum SearchResult<'a> {
     Arc(Arc<Value>),
@@ -426,25 +745,26 @@ impl OpenApiTraverser {
         }
     }
 
-    /// Finds and returns the matching `operation` from the OpenAPI `specification` based on the `request path` and `method`.
+    /// Looks up an OpenAPI operation based on a request path and method.
     ///
     /// # Arguments
     ///
-    /// * `request_path` - The path of the incoming request (e.g., "/users/123")
-    /// * `request_method` - The HTTP method of the request (e.g., "GET", "POST")
+    /// * `request_path` - The actual request path to match against OpenAPI specification paths
+    /// * `request_method` - The HTTP method of the request (e.g., "get", "post", "put")
     ///
     /// # Returns
     ///
     /// * `Ok((Arc<Value>, JsonPath))` - A tuple containing:
-    ///   - An Arc-wrapped JSON Value representing the operation object from the OpenAPI spec
-    ///   - A JsonPath object representing the path to the operation in the spec
-    /// * `Err(PayloadValidationError)` - Returns an error if no matching `operation` is found or if the
-    ///   `specification` is invalid
+    ///   - The operation definition as an Arc<Value>
+    ///   - A JsonPath pointing to the operation in the specification
+    /// * `Err(ValidationError)` - Returns a ValidationError if:
+    ///   - The operation is not found for the given path and method
+    ///   - The path methods in the specification are not in the expected object format
     fn get_operation(
         &self,
         request_path: &str,
         request_method: &str,
-    ) -> Result<(Arc<Value>, JsonPath), PayloadValidationError> {
+    ) -> Result<(Arc<Value>, JsonPath), ValidationError> {
         log::debug!("Looking for path '{request_path}' and method '{request_method}'");
 
         // Grab all paths from the spec
@@ -455,10 +775,11 @@ impl OpenApiTraverser {
                     let operations = match spec_path_methods.as_object() {
                         Some(x) => x,
                         None => {
-                            return Err(PayloadValidationError::InvalidSchema(format!(
-                                "Specification path {} is not an object type",
-                                spec_path
-                            )));
+                            return Err(ValidationError::UnexpectedType(
+                                spec_path.to_string(),
+                                "object",
+                                spec_path_methods.clone(),
+                            ));
                         }
                     };
 
@@ -480,9 +801,10 @@ impl OpenApiTraverser {
                 }
             }
         }
-        Err(PayloadValidationError::InvalidPath(format!(
-            "No path found in specification matching provided path '{request_path}' and method '{request_method}'"
-        )))
+        Err(ValidationError::MissingOperation(
+            request_path.to_string(),
+            request_method.to_string(),
+        ))
     }
 
     /// Determines if a given `path` matches an OpenAPI `specification` `path` pattern.
@@ -539,76 +861,31 @@ impl OpenApiTraverser {
         }
     }
 
-    /// Retrieves the request body schema from an operation based on a specified content type.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - A reference to a JSON Value representing an operation in the OpenAPI specification
-    /// * `content_type` - The media type (MIME type) to search for in the content field (e.g., "application/json")
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(None)` - If the requestBody field is not present, or if the schema field is not present
-    /// * `Ok(Some(SearchResult))` - If the requestBody with the specified content type and schema is found
-    /// * `Err(PayloadValidationError)` - If there are issues finding required fields in
-    fn get_request_body<'a>(
-        &'a self,
-        operation: &'a Value,
-        content_type: &str,
-    ) -> Result<Option<SearchResult<'a>>, PayloadValidationError> {
-        // 'requestBody' is optional
-        let request_body_node = match self.get_optional_spec_node(operation, REQUEST_BODY_FIELD)? {
-            None => return Ok(None),
-            Some(res) => res,
-        };
-
-        // 'content' is required
-        let binding = self.get_spec_node(&request_body_node.value(), CONTENT_FIELD)?;
-        let request_body_content_node = binding.value();
-
-        // 'media type' is mandatory (application/json, application/xml, etc.)
-        let binding = self.get_spec_node(&request_body_content_node, content_type)?;
-        let request_body_media_type_node = binding.value();
-
-        // 'schema' is optional
-        match self.get_optional_spec_node(&request_body_media_type_node, SCHEMA_FIELD)? {
-            None => Ok(None),
-            Some(res) => match res {
-                SearchResult::Arc(arc) => Ok(Some(SearchResult::Arc(arc))),
-                SearchResult::Ref(val) => Ok(Some(SearchResult::Arc(Arc::new(val.clone())))),
-            },
-        }
-    }
-
-    /// Retrieves the `paths` object from the OpenAPI `specification`.
-    ///
-    /// # Returns
-    ///
-    /// * `TraverseResult` - A Result containing either:
-    ///   * `Ok(Arc<Value>)` - An Arc pointer to the `paths` object if found
-    ///   * `Err(PayloadValidationError)` - An error if the `paths` field is missing or reference resolution fails
     fn get_paths(&self) -> TraverseResult {
-        self.get_spec_node(&self.specification, PATHS_FIELD)
+        self.get_required_spec_node(&self.specification, PATHS_FIELD)
     }
 
-    /// Retrieves the "parameters" field from a given operation in an OpenAPI specification.
+    /// Retrieves the `parameters` field from an operation object in an OpenAPI specification.
+    ///
+    /// This function attempts to extract the `parameters` field from the provided operation JSON value,
+    /// treating a missing `parameters` field as a valid case (returns None) rather than an error.
     ///
     /// # Arguments
-    ///
-    /// * `operation` - A reference to a JSON Value representing an operation in the OpenAPI specification
+    /// * `operation` - A reference to a JSON Value representing an operation object from which
+    ///   to extract the `parameters` field
     ///
     /// # Returns
     ///
-    /// * `Ok(None)` - If the "parameters" field doesn't exist in the operation
-    /// * `Ok(Some(SearchResult))` - If the "parameters" field exists, returns the field's value wrapped in `Some`
-    /// * `Err(PayloadValidationError)` - If any error occurs during retrieval (other than the field being optional)
+    /// * `Ok(Some(SearchResult))` - If the `parameters` field exists, returns a wrapped reference to the field value, either as an owned `Arc<Value>` or a borrowed reference
+    /// * `Ok(None)` - If the `parameters` field doesn't exist in the operation object
+    /// * `Err(ValidationError)` - If an error occurs during validation not related to a missing `parameter` field
     fn get_request_parameters<'a>(
         &'a self,
         operation: &'a Value,
-    ) -> Result<Option<SearchResult<'a>>, PayloadValidationError> {
+    ) -> Result<Option<SearchResult<'a>>, ValidationError> {
         match match self.get_optional_spec_node(operation, PARAMETERS_FIELD) {
             Ok(res) => res,
-            Err(e) if e.kind() == PayloadValidationErrorKind::Missing => return Ok(None),
+            Err(e) if e.kind() == ValidationErrorKind::MismatchingSchema => return Ok(None),
             Err(e) => return Err(e),
         } {
             None => Ok(None),
@@ -616,80 +893,84 @@ impl OpenApiTraverser {
         }
     }
 
-    /// Retrieves the security requirements for an operation from an OpenAPI specification.
+    /// Retrieves the security requirements specified for an operation in an OpenAPI specification.
     ///
     /// # Arguments
-    ///
-    /// * `operation` - A reference to a JSON Value representing an operation in the OpenAPI specification
+    /// * `operation` - A JSON value representing an operation object from which to extract the security field
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(SearchResult))` - If the security field exists in the operation
+    /// * `Ok(Some(SearchResult))` - If the security field exists in the operation, contains a reference to its value
     /// * `Ok(None)` - If the security field doesn't exist in the operation
-    /// * `Err(PayloadValidationError)` - If an error occurs during retrieval of the security field
+    /// * `Err(ValidationError)` - If an error occurs during retrieval (other than the field being missing)
     fn get_request_security<'a>(
         &'a self,
         operation: &'a Value,
-    ) -> Result<Option<SearchResult<'a>>, PayloadValidationError> {
+    ) -> Result<Option<SearchResult<'a>>, ValidationError> {
         match self.get_optional_spec_node(operation, SECURITY_FIELD)? {
             None => Ok(None),
             Some(val) => Ok(Some(val)),
         }
     }
 
-    /// Attempts to retrieve an optional field from a JSON operation node, handling the case where the field may not exist.
+    /// Retrieves an optional field from a JSON value in an OpenAPI specification.
+    ///
+    /// This function attempts to get a specified field from a JSON operation object,
+    /// but unlike `get_required_spec_node`, it treats missing fields as valid
+    /// (returns None) rather than errors.
     ///
     /// # Arguments
-    ///
-    /// * `operation` - A reference to a JSON Value representing an operation in the OpenAPI specification
-    /// * `field` - The name of the field to extract from the operation
+    /// * `operation` - The JSON value (typically an operation object) to search within
+    /// * `field` - The name of the optional field to extract
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(SearchResult))` - If the field exists, returns the field's value wrapped in `Some`
-    /// * `Ok(None)` - If the field doesn't exist (and is therefore optional)
-    /// * `Err(PayloadValidationError)` - If any error other than a missing field occurs during retrieval
+    /// * `Ok(Some(SearchResult))` - If the field exists, returns a wrapped reference
+    ///   to the field value, either as an owned `Arc<Value>` or a borrowed reference
+    /// * `Ok(None)` - If the specified field doesn't exist in the value
+    /// * `Err(ValidationError)` - For any error other than a missing field
     fn get_optional_spec_node<'a>(
         &'a self,
         operation: &'a Value,
         field: &str,
-    ) -> Result<Option<SearchResult<'a>>, PayloadValidationError> {
-        match self.get_spec_node(operation, field) {
+    ) -> Result<Option<SearchResult<'a>>, ValidationError> {
+        match self.get_required_spec_node(operation, field) {
             Ok(security) => Ok(Some(security)),
-            Err(e) if e.kind() == PayloadValidationErrorKind::Missing => Ok(None),
+            Err(e) if e.kind() == ValidationErrorKind::MismatchingSchema => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// Retrieves a specified field from a JSON value, handling possible reference resolution.
+    /// Attempts to retrieve a required field from a JSON value, following any references if present.
     ///
     /// # Arguments
-    ///
-    /// * `value` - The JSON value to extract a field from
-    /// * `field` - The name of the field to extract from the value
+    /// * `value` - The JSON value to search within
+    /// * `field` - The name of the required field to extract
     ///
     /// # Returns
-    ///
-    /// * `Ok(SearchResult<'a>)` - A SearchResult containing the extracted field value
-    /// * `Err(PayloadValidationError)` - RequiredFieldMissing error if the field doesn't exist
-    fn get_spec_node<'a>(
+    /// * `Ok(SearchResult)` - A wrapped reference to the requested field value, either as an owned `Arc<Value>`
+    ///   or a borrowed reference
+    /// * `Err(ValidationError::FieldMissing)` - If the specified field doesn't exist in the value
+    fn get_required_spec_node<'a>(
         &'a self,
         value: &'a Value,
         field: &str,
-    ) -> Result<SearchResult<'a>, PayloadValidationError> {
+    ) -> Result<SearchResult<'a>, ValidationError> {
         let ref_result = self.resolve_possible_ref(value)?;
 
         match ref_result {
             SearchResult::Arc(arc_value) => match arc_value.get(field) {
-                None => Err(PayloadValidationError::FieldMissing(
-                    String::from(field),
+                None => Err(ValidationError::FieldMissing(
+                    field.to_string(),
                     value.clone(),
                 )),
+
+                // Any way to avoid a clone here?
                 Some(val) => Ok(SearchResult::Arc(Arc::new(val.clone()))),
             },
             SearchResult::Ref(ref_value) => match ref_value.get(field) {
-                None => Err(PayloadValidationError::FieldMissing(
-                    String::from(field),
+                None => Err(ValidationError::FieldMissing(
+                    field.to_string(),
                     value.clone(),
                 )),
                 Some(val) => Ok(SearchResult::Ref(val)),
@@ -697,39 +978,16 @@ impl OpenApiTraverser {
         }
     }
 
-    /// Attempts to retrieve a field from a JSON value.
+    /// Resolves a JSON node that might contain a reference (via "$ref" field).
     ///
     /// # Arguments
-    ///
-    /// * `value` - The JSON value to extract a field from
-    /// * `field` - The name of the field to retrieve from the value
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(SearchResult::Ref)` - A reference to the found JSON value if the field exists
-    /// * `Err(PayloadValidationError::OptionalFieldMissing)` - Error if the field doesn't exist,
-    ///   containing the field name and a clone of the original value
-    fn get_node<'a>(value: &'a Value, field: &str) -> TraverseResult<'a> {
-        match value.get(field) {
-            None => Err(PayloadValidationError::FieldMissing(
-                String::from(field),
-                value.clone(),
-            )),
-
-            Some(val) => Ok(SearchResult::Ref(val)),
-        }
-    }
-
-    /// Attempts to resolve a JSON reference in a node, returning the referenced value or the original node.
-    ///
-    /// # Arguments
-    /// * `node` - The JSON value node to check for a reference (`$ref` field)
+    /// * `self` - The OpenApiTraverser instance that contains the reference resolution context
+    /// * `node` - The JSON value that might contain a reference to resolve
     ///
     /// # Returns
-    ///
-    /// * `Ok(SearchResult::Arc)` - An Arc-wrapped JSON Value representing the resolved reference
-    /// * `Ok(SearchResult::Ref)` - The original node if it doesn't contain a reference
-    /// * `Err(PayloadValidationError)` - An error if reference resolution fails
+    /// * `Ok(SearchResult::Arc)` - If the node contains a reference that has been previously resolved
+    /// * `Ok(SearchResult::Ref)` - If the node does not contain a reference
+    /// * `Err(ValidationError)` - If reference resolution fails (e.g., circular reference or missing field)
     fn resolve_possible_ref<'a>(&'a self, node: &'a Value) -> TraverseResult<'a> {
         // If the ref node exists, resolve it
         if let Some(ref_string) = node.get(REF_FIELD).and_then(|val| val.as_str()) {
@@ -747,29 +1005,26 @@ impl OpenApiTraverser {
         Ok(SearchResult::Ref(node))
     }
 
-    /// Resolves a JSON `reference` path within an OpenAPI `specification`.
+    /// Resolves a reference string by navigating through the specification object to find the referenced schema.
     ///
     /// # Arguments
-    ///
-    /// * `ref_string` - A string representing the JSON `reference` path to resolve (e.g., "/components/schemas/Pet")
-    /// * `seen_references` - A mutable HashSet that tracks references already processed to detect circular references
+    /// * `ref_string` - A string containing a JSON reference path (e.g., "#/components/schemas/Pet")
+    /// * `seen_references` - A mutable HashSet tracking references already encountered to detect circular references
     ///
     /// # Returns
-    ///
-    /// * `Ok(Arc<Value>)` - An Arc-wrapped JSON Value representing the resolved reference
-    /// * `Err(PayloadValidationError)` - An error if reference resolution fails due to:
-    ///   - Circular references
-    ///   - Missing fields in the path
+    /// * `Ok(SearchResult)` - The resolved schema if the reference was successfully resolved
+    /// * `Err(ValidationError::CircularReference)` - If a circular reference is detected
+    /// * `Err(ValidationError::FieldMissing)` - If a path segment cannot be found in the specification
     fn get_reference_path(
         &self,
         ref_string: &str,
         seen_references: &mut HashSet<String>,
     ) -> TraverseResult {
         if seen_references.contains(ref_string) {
-            return Err(PayloadValidationError::InvalidSchema(format!(
-                "Circular reference found when resolving reference string '{}'",
-                ref_string
-            )));
+            return Err(ValidationError::CircularReference(
+                seen_references.len(),
+                String::from(ref_string),
+            ));
         }
         seen_references.insert(String::from(ref_string));
         let path = ref_string
@@ -785,7 +1040,7 @@ impl OpenApiTraverser {
                     current_schema = next;
                 }
                 None => {
-                    return Err(PayloadValidationError::FieldMissing(
+                    return Err(ValidationError::FieldMissing(
                         String::from(segment),
                         current_schema.clone(),
                     ));
@@ -798,88 +1053,112 @@ impl OpenApiTraverser {
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq)]
-pub enum PayloadValidationErrorKind {
-    InvalidRequest,
+pub enum ValidationErrorKind {
+    InvalidPayload,
     InvalidSpec,
-    Missing,
+    MismatchingSchema,
 }
 
 #[derive(Debug)]
-pub enum PayloadValidationError {
-    InvalidSchema(String),
-    InvalidRequest(String),
-    InvalidResponse(String),
-    InvalidPath(String),
-    InvalidMethod(String),
-    InvalidContentType(String),
-    InvalidAccept(String),
-    InvalidQueryParameters(String),
-    InvalidHeaders(String),
+pub enum ValidationError {
+    RequiredPropertyMissing(String, Value),
+    RequiredParameterMissing(String, String),
+    UnsupportedSpecVersion(String),
+    SchemaValidationFailed(String),
+    ValueExpected(String),
+    DefinitionExpected(String),
+    UnexpectedType(String, &'static str, Value),
+    MissingOperation(String, String),
+    CircularReference(usize, String),
     FieldMissing(String, Value),
     InvalidRef(String),
     InvalidType(String),
 }
 
-impl Display for PayloadValidationError {
+impl Display for ValidationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            PayloadValidationError::InvalidSchema(msg) => write!(f, "InvalidSchema: {}", msg),
-            PayloadValidationError::InvalidRequest(msg) => write!(f, "InvalidRequest: {}", msg),
-            PayloadValidationError::InvalidResponse(msg) => write!(f, "InvalidResponse: {}", msg),
-            PayloadValidationError::InvalidPath(msg) => write!(f, "InvalidPath: {}", msg),
-            PayloadValidationError::InvalidMethod(msg) => write!(f, "InvalidMethod: {}", msg),
-            PayloadValidationError::InvalidContentType(msg) => {
-                write!(f, "InvalidContentType: {}", msg)
+            ValidationError::SchemaValidationFailed(_) => {
+                todo!()
             }
-            PayloadValidationError::InvalidAccept(msg) => write!(f, "InvalidAccept: {}", msg),
-            PayloadValidationError::InvalidQueryParameters(msg) => {
-                write!(f, "InvalidQueryParameters: {}", msg)
+            ValidationError::DefinitionExpected(_) => {
+                todo!()
             }
-            PayloadValidationError::InvalidHeaders(msg) => write!(f, "InvalidHeaders: {}", msg),
-            PayloadValidationError::FieldMissing(msg, node) => {
+            ValidationError::ValueExpected(_) => {
+                todo!()
+            }
+            ValidationError::RequiredPropertyMissing(_, _) => {
+                todo!()
+            }
+            ValidationError::RequiredParameterMissing(param_name, param_type) => {
+                write!(
+                    f,
+                    "RequiredParameterMissing: Missing the {param_type} parameter {param_name}."
+                )
+            }
+            ValidationError::UnsupportedSpecVersion(version) => {
+                write!(
+                    f,
+                    "UnsupportedSpecVersion: Version '{version}' is not supported/valid."
+                )
+            }
+            ValidationError::UnexpectedType(field, expected, node) => {
+                let actual_type = serde_get_type(node);
+                write!(
+                    f,
+                    "UnexpectedType: Expected '{field}' to be '{expected}' but '{actual_type}' was found"
+                )
+            }
+            ValidationError::MissingOperation(path, method) => {
+                write!(
+                    f,
+                    "MissingOperation: Could not find operation for path '{path}' and '{method}'"
+                )
+            }
+            ValidationError::FieldMissing(msg, node) => {
                 write!(
                     f,
                     "RequiredFieldMissing: Object {} is missing required field {}",
                     node, msg
                 )
             }
-            PayloadValidationError::InvalidRef(msg) => write!(f, "InvalidRef: {}", msg),
-            PayloadValidationError::InvalidType(msg) => write!(f, "InvalidType: {}", msg),
+            ValidationError::CircularReference(refs, ref_string) => {
+                write!(
+                    f,
+                    "CircularReference: {ref_string} references {ref_string} at a depth of {refs}"
+                )
+            }
+            ValidationError::InvalidRef(msg) => write!(f, "InvalidRef: {}", msg),
+            ValidationError::InvalidType(msg) => write!(f, "InvalidType: {}", msg),
         }
     }
 }
 
-impl PayloadValidationError {
-    pub fn kind(&self) -> PayloadValidationErrorKind {
+impl ValidationError {
+    pub fn kind(&self) -> ValidationErrorKind {
         match self {
-            // Invalid request
-            PayloadValidationError::InvalidSchema(_)
-            | PayloadValidationError::InvalidRequest(_)
-            | PayloadValidationError::InvalidResponse(_)
-            | PayloadValidationError::InvalidPath(_)
-            | PayloadValidationError::InvalidMethod(_)
-            | PayloadValidationError::InvalidContentType(_)
-            | PayloadValidationError::InvalidAccept(_)
-            | PayloadValidationError::InvalidQueryParameters(_)
-            | PayloadValidationError::InvalidHeaders(_) => {
-                PayloadValidationErrorKind::InvalidRequest
-            }
+            ValidationError::ValueExpected(_)
+            | ValidationError::SchemaValidationFailed(_)
+            | ValidationError::RequiredParameterMissing(_, _)
+            | ValidationError::MissingOperation(_, _)
+            | ValidationError::RequiredPropertyMissing(_, _) => ValidationErrorKind::InvalidPayload,
 
-            // Can be an error in some situations, but not always
-            PayloadValidationError::FieldMissing(_, _) => PayloadValidationErrorKind::Missing,
+            ValidationError::FieldMissing(_, _) => ValidationErrorKind::MismatchingSchema,
 
-            // Invalid specification
-            PayloadValidationError::InvalidRef(_) | PayloadValidationError::InvalidType(_) => {
-                PayloadValidationErrorKind::InvalidSpec
-            }
+            ValidationError::InvalidRef(_)
+            | ValidationError::UnsupportedSpecVersion(_)
+            | ValidationError::InvalidType(_)
+            | ValidationError::DefinitionExpected(_)
+            | ValidationError::UnexpectedType(_, _, _)
+            | ValidationError::CircularReference(_, _) => ValidationErrorKind::InvalidSpec,
         }
     }
 }
 
-impl std::error::Error for PayloadValidationError {}
+impl std::error::Error for ValidationError {}
 
 #[derive(Debug, Clone)]
-struct JsonPath(pub Vec<String>);
+pub struct JsonPath(pub Vec<String>);
 
 impl JsonPath {
     fn new() -> Self {
@@ -887,8 +1166,10 @@ impl JsonPath {
     }
 
     fn add_segment(&mut self, segment: &str) -> &mut Self {
-        if segment.contains(PATH_SEPARATOR) {
-            let segment = segment.replace(PATH_SEPARATOR, ENCODED_BACKSLASH);
+        if segment.contains(TILDE) || segment.contains(PATH_SEPARATOR) {
+            let segment = segment
+                .replace(TILDE, ENCODED_TILDE)
+                .replace(PATH_SEPARATOR, ENCODED_BACKSLASH);
             self.0.push(segment);
         } else {
             self.0.push(segment.to_owned());
@@ -904,7 +1185,7 @@ impl JsonPath {
 
 #[cfg(test)]
 mod test {
-    use crate::{JsonPath, OpenApiPayloadValidator, OpenApiTraverser};
+    use crate::{JsonPath, NAME_FIELD, OpenApiPayloadValidator, ValidationError};
     use memory_stats::memory_stats;
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -957,14 +1238,11 @@ mod test {
     fn test_find_request_body() {
         let spec_string = fs::read_to_string("./test/openapi-v3.0.2.json").unwrap();
         let specification: Value = serde_json::from_str(&spec_string).unwrap();
-        let traverser = OpenApiTraverser::new(specification.clone());
         let validator = OpenApiPayloadValidator::new(specification).unwrap();
         let result: (Arc<Value>, JsonPath) =
             validator.traverser.get_operation("/pet", "post").unwrap();
         let operation = result.0.clone();
         assert!(operation.get("requestBody").is_some());
-        let request_body = traverser.get_request_body(&result.0, "application/json");
-        assert!(request_body.is_ok());
     }
 
     #[test]
@@ -1066,5 +1344,176 @@ mod test {
                 assert!(true, "Body is invalid")
             }
         }
+    }
+
+    #[test]
+    fn test_check_required_params() {
+        let spec_string = fs::read_to_string("./test/openapi-v3.0.2.json").unwrap();
+        let specification: Value = serde_json::from_str(&spec_string).unwrap();
+        let validator = OpenApiPayloadValidator::new(specification).unwrap();
+
+        // Test case 1: No parameters should pass
+        let empty_params = json!([]);
+        let empty_headers: Option<&HashMap<UniCase<String>, String>> = None;
+        assert!(
+            validator
+                .check_required_params(&empty_params, empty_headers)
+                .is_ok()
+        );
+
+        // Test case 2: Required parameter is present - should pass
+        let param_schema = json!([
+            {
+                "name": "api-key",
+                "in": "header",
+                "required": true
+            }
+        ]);
+
+        let mut headers = HashMap::new();
+        headers.insert(UniCase::from("api-key".to_string()), "abc123".to_string());
+
+        assert!(
+            validator
+                .check_required_params(&param_schema, Some(&headers))
+                .is_ok()
+        );
+
+        // Test case 3: Required parameter is missing - should fail
+        let param_schema = json!([
+            {
+                "name": "api-key",
+                "in": "header",
+                "required": true
+            }
+        ]);
+
+        let empty_headers = HashMap::new();
+
+        let result = validator.check_required_params(&param_schema, Some(&empty_headers));
+        assert!(result.is_err());
+        if let Err(ValidationError::RequiredParameterMissing(param_name, section)) = result {
+            assert_eq!(param_name, "api-key");
+            assert_eq!(section, "header");
+        } else {
+            panic!("Expected RequiredParameterMissing error");
+        }
+
+        // Test case 4: Optional parameter is missing - should pass
+        let param_schema = json!([
+            {
+                "name": "optional-param",
+                "in": "header",
+                "required": false
+            }
+        ]);
+
+        let empty_headers = HashMap::new();
+
+        assert!(
+            validator
+                .check_required_params(&param_schema, Some(&empty_headers))
+                .is_ok()
+        );
+
+        // Test case 5: Parameter schema missing 'name' field - should fail
+        let param_schema = json!([
+            {
+                "in": "header",
+                "required": true
+            }
+        ]);
+
+        let headers = HashMap::new();
+
+        let result = validator.check_required_params(&param_schema, Some(&headers));
+        assert!(result.is_err());
+        if let Err(ValidationError::FieldMissing(field, _)) = result {
+            assert_eq!(field, NAME_FIELD);
+        } else {
+            panic!("Expected FieldMissing error for name field");
+        }
+
+        // Test case 6: Parameter schema missing 'in' field - should fail
+        let param_schema = json!([
+            {
+                "name": "api-key",
+                "required": true
+            }
+        ]);
+
+        let headers = HashMap::new();
+
+        let result = validator.check_required_params(&param_schema, Some(&headers));
+        assert!(result.is_err());
+        if let Err(ValidationError::FieldMissing(field, _)) = result {
+            assert_eq!(field, "in");
+        } else {
+            panic!("Expected FieldMissing error for 'in' field");
+        }
+
+        // Test case 7: Multiple parameters - some required, some optional
+        let param_schema = json!([
+            {
+                "name": "api-key",
+                "in": "header",
+                "required": true
+            },
+            {
+                "name": "content-type",
+                "in": "header",
+                "required": true
+            },
+            {
+                "name": "optional-param",
+                "in": "header",
+                "required": false
+            }
+        ]);
+
+        let mut headers = HashMap::new();
+        headers.insert(UniCase::from("api-key".to_string()), "abc123".to_string());
+        headers.insert(
+            UniCase::from("content-type".to_string()),
+            "application/json".to_string(),
+        );
+
+        assert!(
+            validator
+                .check_required_params(&param_schema, Some(&headers))
+                .is_ok()
+        );
+
+        // Test case 8: Parameter with default required value (no required field)
+        let param_schema = json!([
+            {
+                "name": "default-optional",
+                "in": "header"
+                // No required field - should default to false
+            }
+        ]);
+
+        let empty_headers = HashMap::new();
+
+        assert!(
+            validator
+                .check_required_params(&param_schema, Some(&empty_headers))
+                .is_ok()
+        );
+
+        // Test case 9: Non-array parameters should be handled gracefully
+        let non_array_params = json!({
+            "name": "api-key",
+            "in": "header",
+            "required": true
+        });
+
+        let headers = HashMap::new();
+
+        assert!(
+            validator
+                .check_required_params(&non_array_params, Some(&headers))
+                .is_ok()
+        );
     }
 }
