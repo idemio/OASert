@@ -11,6 +11,7 @@ pub struct Operation {
     pub(crate) path: JsonPath
 }
 
+#[derive(PartialEq, Debug)]
 pub enum ParameterLocation {
     Header,
     Query,
@@ -44,7 +45,7 @@ impl FromStr for OpenApiVersion {
         } else if s.starts_with("3.0") {
             Ok(OpenApiVersion::V30x)
         } else {
-            Err(ValidationError::UnsupportedSpecVersion(s.to_string()))
+            Err(ValidationError::UnsupportedSpecVersion)
         }
     }
 }
@@ -60,4 +61,8 @@ impl OpenApiVersion {
 
 pub trait RequestParamData {
     fn get(&self) -> &HashMap<UniCase<String>, String>;
+}
+
+pub trait RequestBodyData {
+    fn get(&self) -> &Value;
 }

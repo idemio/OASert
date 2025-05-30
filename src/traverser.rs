@@ -1,7 +1,7 @@
 use crate::types::Operation;
 use crate::{
-    ENCODED_BACKSLASH, JsonPath, PARAMETERS_FIELD, PATH_SEPARATOR, PATHS_FIELD, REF_FIELD,
-    SECURITY_FIELD, ValidationError, ValidationErrorKind,
+    JsonPath, PATH_SEPARATOR, PATHS_FIELD, REF_FIELD,
+    ValidationError, ValidationErrorKind,
 };
 use dashmap::{DashMap, Entry};
 use serde_json::{Map, Value};
@@ -87,10 +87,7 @@ impl OpenApiTraverser {
                         }
                     }
                 }
-                Err(ValidationError::MissingOperation(
-                    request_path.to_string(),
-                    request_method.to_string(),
-                ))
+                Err(ValidationError::MissingOperation)
             }
         }
     }
@@ -153,26 +150,6 @@ impl OpenApiTraverser {
         }
     }
 
-    /// Retrieves the security requirements specified for an operation in an OpenAPI specification.
-    ///
-    /// # Arguments
-    /// * `operation` - A JSON value representing an operation object from which to extract the security field
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Some(SearchResult))` - If the security field exists in the operation, contains a reference to its value
-    /// * `Ok(None)` - If the security field doesn't exist in the operation
-    /// * `Err(ValidationError)` - If an error occurs during retrieval (other than the field being missing)
-    fn get_request_security<'a>(
-        &'a self,
-        operation: &'a Value,
-    ) -> Result<Option<SearchResult<'a>>, ValidationError> {
-        match self.get_optional_spec_node(operation, SECURITY_FIELD)? {
-            None => Ok(None),
-            Some(val) => Ok(Some(val)),
-        }
-    }
-
     /// Retrieves an optional field from a JSON value in an OpenAPI specification.
     ///
     /// This function attempts to get a specified field from a JSON operation object,
@@ -232,17 +209,11 @@ impl OpenApiTraverser {
         let ref_result = self.resolve_possible_ref(node)?;
         match ref_result {
             SearchResult::Arc(val) => match val.get(field) {
-                None => Err(ValidationError::FieldMissing(
-                    field.to_string(),
-                    val.as_ref().clone(),
-                )),
+                None => Err(ValidationError::FieldMissing),
                 Some(v) => Ok(SearchResult::Arc(Arc::new(v.clone()))),
             },
             SearchResult::Ref(val) => match val.get(field) {
-                None => Err(ValidationError::FieldMissing(
-                    field.to_string(),
-                    val.clone(),
-                )),
+                None => Err(ValidationError::FieldMissing),
                 Some(v) => Ok(SearchResult::Ref(v)),
             },
         }
@@ -293,10 +264,7 @@ impl OpenApiTraverser {
         'a: 'b,
     {
         if seen_references.contains(ref_string) {
-            return Err(ValidationError::CircularReference(
-                seen_references.len(),
-                String::from(ref_string),
-            ));
+            return Err(ValidationError::CircularReference);
         }
         seen_references.insert(String::from(ref_string));
         let path = ref_string
@@ -307,10 +275,7 @@ impl OpenApiTraverser {
 
         let current_schema = match &self.specification.pointer(&path) {
             None => {
-                return Err(ValidationError::FieldMissing(
-                    path,
-                    self.specification.clone(),
-                ));
+                return Err(ValidationError::FieldMissing);
             }
             Some(v) => self.resolve_possible_ref(v)?,
         };
@@ -336,10 +301,7 @@ where
 {
     log::trace!("Grabbing {} from {} as a bool.", field, node.to_string());
     match node.get(field) {
-        None => Err(ValidationError::FieldMissing(
-            field.to_string(),
-            node.clone(),
-        )),
+        None => Err(ValidationError::FieldMissing),
         Some(found) => require_bool(found),
     }
 }
@@ -361,10 +323,7 @@ where
 {
     log::trace!("Grabbing {} from {} as a str.", field, node.to_string());
     match node.get(field) {
-        None => Err(ValidationError::FieldMissing(
-            field.to_string(),
-            node.clone(),
-        )),
+        None => Err(ValidationError::FieldMissing),
         Some(found) => Ok(found),
     }
 }
@@ -387,10 +346,7 @@ where
 {
     log::trace!("Grabbing {} from {} as a str.", field, node.to_string());
     match node.get(field) {
-        None => Err(ValidationError::FieldMissing(
-            field.to_string(),
-            node.clone(),
-        )),
+        None => Err(ValidationError::FieldMissing),
         Some(found) => require_str(found),
     }
 }
@@ -416,10 +372,7 @@ where
 {
     log::trace!("Grabbing {} from {} as an array.", field, node.to_string());
     match node.get(field) {
-        None => Err(ValidationError::FieldMissing(
-            field.to_string(),
-            node.clone(),
-        )),
+        None => Err(ValidationError::FieldMissing),
         Some(found) => require_array(found),
     }
 }
@@ -444,10 +397,7 @@ where
 {
     log::trace!("Grabbing {} from {} as an object.", field, node.to_string());
     match node.get(field) {
-        None => Err(ValidationError::FieldMissing(
-            field.to_string(),
-            node.clone(),
-        )),
+        None => Err(ValidationError::FieldMissing),
         Some(found) => require_object(found),
     }
 }
@@ -468,7 +418,7 @@ where
     'a: 'b,
 {
     match node.as_bool() {
-        None => Err(ValidationError::UnexpectedType("bool", node.clone())),
+        None => Err(ValidationError::UnexpectedType),
         Some(bool) => Ok(bool),
     }
 }
@@ -486,7 +436,7 @@ where
     'a: 'b,
 {
     match node.as_str() {
-        None => Err(ValidationError::UnexpectedType("string", node.clone())),
+        None => Err(ValidationError::UnexpectedType),
         Some(string) => Ok(string),
     }
 }
@@ -508,7 +458,7 @@ where
     'a: 'b,
 {
     match node.as_object() {
-        None => Err(ValidationError::UnexpectedType("object", node.clone())),
+        None => Err(ValidationError::UnexpectedType),
         Some(map) => Ok(map),
     }
 }
@@ -528,7 +478,7 @@ where
     'a: 'b,
 {
     match node.as_array() {
-        None => Err(ValidationError::UnexpectedType("array", node.clone())),
+        None => Err(ValidationError::UnexpectedType),
         Some(array) => Ok(array),
     }
 }
