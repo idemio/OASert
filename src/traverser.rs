@@ -1,12 +1,12 @@
 use crate::types::Operation;
 use crate::{
-    JsonPath, PATH_SEPARATOR, PATHS_FIELD, REF_FIELD,
-    ValidationError, ValidationErrorKind,
+    PATH_SEPARATOR, PATHS_FIELD, REF_FIELD,
 };
 use dashmap::{DashMap, Entry};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
+use crate::validator::{JsonPath, ValidationError, ValidationErrorKind};
 
 type TraverseResult<'a> = Result<SearchResult<'a>, ValidationError>;
 
@@ -52,11 +52,12 @@ impl OpenApiTraverser {
             .entry((String::from(request_path), String::from(request_method)));
         match entry {
             Entry::Occupied(e) => Ok(e.get().clone()),
-            Entry::Vacant(_) => {
+            Entry::Vacant(e) => {
                 // Grab all paths from the spec
-                if let Ok(spec_paths) = get_as_object(&self.specification, PATHS_FIELD) {
-                    for (spec_path, spec_path_methods) in spec_paths.iter() {
-                        let operations = require_object(spec_path_methods)?;
+                if let Ok(spec_paths) = self.get_required_spec_node(&self.specification, PATHS_FIELD) {
+                    let spec_paths = Self::require_object(spec_paths.value())?;
+                    for (spec_path, spec_path_methods) in spec_paths {
+                        let operations = Self::require_object(spec_path_methods)?;
 
                         // Grab the operation matching our request method and test to see if the path matches our request path.
                         // If both method and path match, then we've found the operation associated with the request.
@@ -77,10 +78,7 @@ impl OpenApiTraverser {
                                 });
 
                                 if !Self::path_has_parameter(spec_path) {
-                                    self.resolved_operations.insert(
-                                        (request_path.to_string(), request_method.to_string()),
-                                        operation.clone(),
-                                    );
+                                    e.insert(operation.clone());
                                 }
                                 return Ok(operation);
                             }
@@ -230,14 +228,32 @@ impl OpenApiTraverser {
     /// * `Ok(SearchResult::Ref)` - If the node does not contain a `reference`
     /// * `Err(ValidationError)` - If `reference` resolution fails (e.g., circular `reference` or missing field)
     fn resolve_possible_ref<'a>(&'a self, node: &'a Value) -> TraverseResult<'a> {
-        if let Ok(ref_string) = get_as_str(node, REF_FIELD) {
+        if let Ok(ref_string) = Self::get_as_str(node, REF_FIELD) {
+            println!("Checking for: {}", ref_string);
             let entry = self.resolved_references.entry(String::from(ref_string));
             return match entry {
-                Entry::Occupied(e) => Ok(SearchResult::Arc(e.get().clone())),
-                Entry::Vacant(_) => {
+                Entry::Occupied(entry) => {
+                    println!("Found: {}", ref_string);
+                    Ok(SearchResult::Arc(entry.get().clone()))
+                },
+                Entry::Vacant(entry) => {
+                    println!("Ref string {} not found, solving", ref_string);
                     let mut seen_references = HashSet::new();
                     let res = self.get_reference_path(ref_string, &mut seen_references)?;
-                    return Ok(res);
+                    let res = match res {
+                        SearchResult::Arc(val) => {
+                            let ret = val;
+                            entry.insert(ret.clone());
+                            ret
+                        },
+                        SearchResult::Ref(val) => {
+                            let res = Arc::new(val.clone());
+                            entry.insert(res.clone());
+                            res
+                        }
+                    };
+                    println!("Resolved {} with value of {}", ref_string, res);
+                    return Ok(SearchResult::Arc(res));
                 }
             };
         }
@@ -257,8 +273,8 @@ impl OpenApiTraverser {
     /// * `Err(ValidationError::FieldMissing)` - If a path cannot be found in the specification
     fn get_reference_path<'a, 'b>(
         &'a self,
-        ref_string: &str,
-        seen_references: &mut HashSet<String>,
+        ref_string: &'a str,
+        seen_references: &mut HashSet<&'a str>,
     ) -> TraverseResult<'b>
     where
         'a: 'b,
@@ -266,219 +282,128 @@ impl OpenApiTraverser {
         if seen_references.contains(ref_string) {
             return Err(ValidationError::CircularReference);
         }
-        seen_references.insert(String::from(ref_string));
+        seen_references.insert(ref_string);
+        let mut complete_path = String::from("/");
         let path = ref_string
             .split(PATH_SEPARATOR)
             .filter(|node| !(*node).is_empty() && (*node != "#"))
             .collect::<Vec<&str>>()
             .join("/");
+        complete_path.push_str(&path);
 
-        let current_schema = match &self.specification.pointer(&path) {
+        let current_schema = match &self.specification.pointer(&complete_path) {
             None => {
+                println!("Could not find pointer path: {}, {}", path, &self.specification);
                 return Err(ValidationError::FieldMissing);
             }
             Some(v) => self.resolve_possible_ref(v)?,
         };
         Ok(current_schema)
     }
-}
 
-/// Retrieves a `boolean` value from a JSON object at the specified field.
-///
-/// # Arguments
-///
-/// * `node` - A reference to the JSON `Value` object from which to retrieve the field.
-/// * `field` - A string slice representing the key of the field to be extracted.
-///
-/// # Returns
-///
-/// * `Ok(bool)` - If the field exists and its value can be successfully interpreted as a `boolean`.
-/// * `Err(ValidationError::FieldMissing)` - If the field is not present in the given JSON object.
-/// * `Err(ValidationError::UnexpectedType)` - If the field exists but its value is not a `boolean`.
-pub(crate) fn get_as_bool<'a, 'b>(node: &'a Value, field: &str) -> Result<bool, ValidationError>
-where
-    'a: 'b,
-{
-    log::trace!("Grabbing {} from {} as a bool.", field, node.to_string());
-    match node.get(field) {
-        None => Err(ValidationError::FieldMissing),
-        Some(found) => require_bool(found),
+    /// Retrieves the value of a specified field from a `Value` and attempts to return it as a string.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - A reference to a `Value` object representing the data structure to be queried.
+    /// * `field` - A string slice representing the key (field name) to retrieve from the `node`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&str)` - If the field exists in the `node` and its value can successfully be interpreted as a string.
+    /// * `Err(ValidationError::FieldMissing)` - If the specified field does not exist in the `node`.
+    /// * `Err(ValidationError::UnexpectedType)` - If the field exists but its value is not a string.
+    fn get_as_str<'a, 'b>(node: &'a Value, field: &str) -> Result<&'b str, ValidationError>
+    where
+        'a: 'b,
+    {
+        log::trace!("Grabbing {} from {} as a str.", field, node.to_string());
+        match node.get(field) {
+            None => Err(ValidationError::FieldMissing),
+            Some(found) => Self::require_str(found),
+        }
+    }
+
+    /// Attempts to convert the provided JSON value into a boolean.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - A reference to a `Value` (from `serde_json`) representing a JSON structure.
+    ///   It is expected to be a valid JSON value of type boolean.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(bool)` - If the `Value` provided is a boolean
+    /// * `Err(ValidationError::UnexpectedType)` - If the `Value` provided is not a boolean
+    pub(crate) fn require_bool<'a, 'b>(node: &'a Value) -> Result<bool, ValidationError>
+    where
+        'a: 'b,
+    {
+        match node.as_bool() {
+            None => Err(ValidationError::UnexpectedType),
+            Some(bool) => Ok(bool),
+        }
+    }
+
+    /// Attempts to extract a `string` (`&str`) from a JSON `Value`.
+    ///
+    /// # Arguments
+    /// * `node` - A reference to a JSON `Value` from which the function will attempt to extract a `string`.
+    ///
+    /// # Returns
+    /// * `Ok(&str)` - If the `Value` is a `string`.
+    /// * `Err(ValidationError::UnexpectedType` - If the `Value` is not a `string`
+    pub(crate) fn require_str<'a, 'b>(node: &'a Value) -> Result<&'b str, ValidationError>
+    where
+        'a: 'b,
+    {
+        match node.as_str() {
+            None => Err(ValidationError::UnexpectedType),
+            Some(string) => Ok(string),
+        }
+    }
+
+    /// Validates and extracts an object from a JSON `Value`.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - A reference to a `Value`, which is expected to be a JSON object.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&Map<String, Value>)` - If the `Value` is an object
+    /// * `Err(ValidationError::UnexpectedType)` - If the `Value` is not an object.
+    pub(crate) fn require_object<'a, 'b>(
+        node: &'a Value,
+    ) -> Result<&'b Map<String, Value>, ValidationError>
+    where
+        'a: 'b,
+    {
+        match node.as_object() {
+            None => Err(ValidationError::UnexpectedType),
+            Some(map) => Ok(map),
+        }
+    }
+
+    /// Attempts to ensure that a given JSON `Value` is of `array` type.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - A reference to a `Value` (from `serde_json`) that is evaluated to check whether it is an `array`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&Vec<Value>)` - If the `node` is an `array`
+    /// * `Err(ValidationError::UnexpectedType)` - If the `node` is not an `array`.
+    pub(crate) fn require_array<'a, 'b>(node: &'a Value) -> Result<&'b Vec<Value>, ValidationError>
+    where
+        'a: 'b,
+    {
+        match node.as_array() {
+            None => Err(ValidationError::UnexpectedType),
+            Some(array) => Ok(array),
+        }
     }
 }
 
-/// Retrieves the value of a specified field from a JSON object.
-///
-/// # Arguments
-///
-/// * `node` - A reference to a `Value` representing the JSON object to search within.
-/// * `field` - A string slice representing the key of the field to be retrieved.
-///
-/// # Returns
-///
-/// * `Ok(&Value)` - The value associated with the specified field if it exists.
-/// * `Err(ValidationError::FieldMissing)` - An error indicating that the specified field was not found in the JSON object.
-pub(crate) fn get_as_any<'a, 'b>(node: &'a Value, field: &str) -> Result<&'b Value, ValidationError>
-where
-    'a: 'b,
-{
-    log::trace!("Grabbing {} from {} as a str.", field, node.to_string());
-    match node.get(field) {
-        None => Err(ValidationError::FieldMissing),
-        Some(found) => Ok(found),
-    }
-}
 
-/// Retrieves the value of a specified field from a `Value` and attempts to return it as a string.
-///
-/// # Arguments
-///
-/// * `node` - A reference to a `Value` object representing the data structure to be queried.
-/// * `field` - A string slice representing the key (field name) to retrieve from the `node`.
-///
-/// # Returns
-///
-/// * `Ok(&str)` - If the field exists in the `node` and its value can successfully be interpreted as a string.
-/// * `Err(ValidationError::FieldMissing)` - If the specified field does not exist in the `node`.
-/// * `Err(ValidationError::UnexpectedType)` - If the field exists but its value is not a string.
-pub(crate) fn get_as_str<'a, 'b>(node: &'a Value, field: &str) -> Result<&'b str, ValidationError>
-where
-    'a: 'b,
-{
-    log::trace!("Grabbing {} from {} as a str.", field, node.to_string());
-    match node.get(field) {
-        None => Err(ValidationError::FieldMissing),
-        Some(found) => require_str(found),
-    }
-}
-
-/// Attempts to retrieve the value of a specified field from a `Value` object and interpret it as an `array`.
-///
-/// # Arguments
-///
-/// * `node` - A reference to a `Value` object from which the field will be retrieved.
-/// * `field` - A string slice representing the name of the field to extract.
-///
-/// # Returns
-///
-/// * `Ok(&Vec<Value>)` - If the field is found, and its value is an `array`.
-/// * `Err(ValidationError::FieldMissing)` - If the specified field is not present in the `node`.
-/// * `Err(ValidationError::UnexpectedType)` - If the field is found but, its value is not of type `array`.
-pub(crate) fn get_as_array<'a, 'b>(
-    node: &'a Value,
-    field: &str,
-) -> Result<&'b Vec<Value>, ValidationError>
-where
-    'a: 'b,
-{
-    log::trace!("Grabbing {} from {} as an array.", field, node.to_string());
-    match node.get(field) {
-        None => Err(ValidationError::FieldMissing),
-        Some(found) => require_array(found),
-    }
-}
-
-/// Attempts to retrieve a field from a JSON `Value` as an `object`, returning an error if the field
-/// is missing or the value is not an `object`.
-///
-/// # Arguments
-/// - `node`: A reference to a `Value` that contains the data to be searched.
-/// - `field`: A string slice referring to the name of the field to extract.
-///
-/// # Returns
-/// * `Ok(&Map<String, Value>)` - If the field is found, and its value is an `object`.
-/// * `Err(ValidationError::FieldMissing)` - If the specified field is not present in the `node`.
-/// * `Err(ValidationError::UnexpectedType)` - If the field is found, but its value is not of type `object`.
-pub(crate) fn get_as_object<'a, 'b>(
-    node: &'a Value,
-    field: &str,
-) -> Result<&'b Map<String, Value>, ValidationError>
-where
-    'a: 'b,
-{
-    log::trace!("Grabbing {} from {} as an object.", field, node.to_string());
-    match node.get(field) {
-        None => Err(ValidationError::FieldMissing),
-        Some(found) => require_object(found),
-    }
-}
-
-/// Attempts to convert the provided JSON value into a boolean.
-///
-/// # Arguments
-///
-/// * `node` - A reference to a `Value` (from `serde_json`) representing a JSON structure.
-///   It is expected to be a valid JSON value of type boolean.
-///
-/// # Returns
-///
-/// * `Ok(bool)` - If the `Value` provided is a boolean
-/// * `Err(ValidationError::UnexpectedType)` - If the `Value` provided is not a boolean
-pub(crate) fn require_bool<'a, 'b>(node: &'a Value) -> Result<bool, ValidationError>
-where
-    'a: 'b,
-{
-    match node.as_bool() {
-        None => Err(ValidationError::UnexpectedType),
-        Some(bool) => Ok(bool),
-    }
-}
-
-/// Attempts to extract a `string` (`&str`) from a JSON `Value`.
-///
-/// # Arguments
-/// * `node` - A reference to a JSON `Value` from which the function will attempt to extract a `string`.
-///
-/// # Returns
-/// * `Ok(&str)` - If the `Value` is a `string`.
-/// * `Err(ValidationError::UnexpectedType` - If the `Value` is not a `string`
-pub(crate) fn require_str<'a, 'b>(node: &'a Value) -> Result<&'b str, ValidationError>
-where
-    'a: 'b,
-{
-    match node.as_str() {
-        None => Err(ValidationError::UnexpectedType),
-        Some(string) => Ok(string),
-    }
-}
-
-/// Validates and extracts an object from a JSON `Value`.
-///
-/// # Arguments
-///
-/// * `node` - A reference to a `Value`, which is expected to be a JSON object.
-///
-/// # Returns
-///
-/// * `Ok(&Map<String, Value>)` - If the `Value` is an object
-/// * `Err(ValidationError::UnexpectedType)` - If the `Value` is not an object.
-pub(crate) fn require_object<'a, 'b>(
-    node: &'a Value,
-) -> Result<&'b Map<String, Value>, ValidationError>
-where
-    'a: 'b,
-{
-    match node.as_object() {
-        None => Err(ValidationError::UnexpectedType),
-        Some(map) => Ok(map),
-    }
-}
-
-/// Attempts to ensure that a given JSON `Value` is of `array` type.
-///
-/// # Arguments
-///
-/// * `node` - A reference to a `Value` (from `serde_json`) that is evaluated to check whether it is an `array`.
-///
-/// # Returns
-///
-/// * `Ok(&Vec<Value>)` - If the `node` is an `array`
-/// * `Err(ValidationError::UnexpectedType)` - If the `node` is not an `array`.
-pub(crate) fn require_array<'a, 'b>(node: &'a Value) -> Result<&'b Vec<Value>, ValidationError>
-where
-    'a: 'b,
-{
-    match node.as_array() {
-        None => Err(ValidationError::UnexpectedType),
-        Some(array) => Ok(array),
-    }
-}

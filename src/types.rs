@@ -4,7 +4,7 @@ use std::str::FromStr;
 use jsonschema::Draft;
 use serde_json::Value;
 use unicase::UniCase;
-use crate::{JsonPath, ValidationError};
+use crate::validator::{JsonPath, ValidationError};
 
 pub struct Operation {
     pub(crate) data: Value,
