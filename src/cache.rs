@@ -194,66 +194,40 @@ mod tests {
     #[test]
     fn test_cache_get_insert() {
         let cache = ValidatorCache::new();
-
-        // Initially the cache should be empty
         assert!(cache.get("test").is_err());
-
-        // Insert a validator
         let spec = json!({
             "openapi": "3.1.0"
         });
-
         let validator = cache.insert("test".to_string(), spec).unwrap();
         assert!(!cache.is_empty());
         assert_eq!(cache.len(), 1);
-
-        // Get the validator back
         let cached = cache.get("test").unwrap();
-
-        // Check that we got the same validator
         assert!(Arc::ptr_eq(&validator, &cached));
     }
 
     #[test]
     fn test_cache_get_or_insert() {
         let cache = ValidatorCache::new();
-
-        // Initially the cache should be empty
         assert!(cache.get("test").is_err());
-
-        // Get or insert a validator
         let spec = json!({
             "openapi": "3.1.0"
         });
-
         let validator1 = cache.get_or_insert("test".to_string(), spec.clone()).unwrap();
-
-        // Get or insert again with the same ID
         let validator2 = cache.get_or_insert("test".to_string(), json!({"openapi": "3.0.0"})).unwrap();
-
-        // Should get the same validator, not create a new one
         assert!(Arc::ptr_eq(&validator1, &validator2));
-
-        // Check we only have one entry
         assert_eq!(cache.len(), 1);
     }
 
     #[test]
     fn test_cache_clear() {
         let cache = ValidatorCache::new();
-
-        // Insert multiple validators
         let spec = json!({
             "openapi": "3.1.0"
         });
-
         cache.insert("test1".to_string(), spec.clone()).unwrap();
         cache.insert("test2".to_string(), spec.clone()).unwrap();
         cache.insert("test3".to_string(), spec).unwrap();
-
         assert_eq!(cache.len(), 3);
-
-        // Clear the cache
         cache.clear();
         assert!(cache.is_empty());
     }
@@ -261,24 +235,13 @@ mod tests {
     #[test]
     fn test_global_cache() {
         let cache = global_validator_cache();
-
-        // Clear any existing entries for a clean test
         cache.clear();
-
-        // Insert a validator
         let spec = json!({
             "openapi": "3.1.0"
         });
-
         cache.insert("global_test".to_string(), spec).unwrap();
-
-        // Get the same cache again
         let same_cache = global_validator_cache();
-
-        // Check that it has our validator
         assert!(same_cache.get("global_test").is_ok());
-
-        // Clean up
         cache.clear();
     }
 }

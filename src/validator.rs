@@ -1,7 +1,5 @@
 use crate::traverser::OpenApiTraverser;
-use crate::types::{
-    OpenApiVersion, Operation, ParameterLocation, RequestBodyData, RequestParamData,
-};
+use crate::types::{OpenApiTypes, OpenApiVersion, Operation, ParameterLocation, RequestBodyData, RequestParamData};
 use crate::{
     CONTENT_FIELD, ENCODED_BACKSLASH, ENCODED_TILDE, IN_FIELD, NAME_FIELD, OPENAPI_FIELD,
     PARAMETERS_FIELD, PATH_SEPARATOR, REF_FIELD, REQUEST_BODY_FIELD, REQUIRED_FIELD, SCHEMA_FIELD,
@@ -310,7 +308,7 @@ pub(crate) trait Validator {
     /// # Returns
     ///
     /// * `Ok(())` - If validation succeeds
-    /// * `Err(ValidationError::SchemaValidationFailed)` - If either schema building fails or validation fails
+    /// * `Err(ValidationError::SchemaValidationFailed)` - If either schema building fails, or validation fails
     fn complex_validation(
         options: &ValidationOptions,
         json_path: &JsonPath,
@@ -346,8 +344,17 @@ pub(crate) trait Validator {
     /// * `Ok(())` - If the instance successfully validates against the schema
     /// * `Err(ValidationError::SchemaValidationFailed)` - If validation fails for any reason
     fn simple_validation(schema: &Value, instance: &Value) -> Result<(), ValidationError> {
-        if let Err(e) = jsonschema::validate(schema, instance) {
-            return Err(ValidationError::SchemaValidationFailed);
+        if let Some(string) = instance.as_str() {
+            let instance = OpenApiTypes::convert_string_to_schema_type(schema, string)?;
+            if let Err(e) = jsonschema::validate(schema, &instance) {
+                println!("Error: {e}");
+                return Err(ValidationError::SchemaValidationFailed);
+            }
+        } else {
+            if let Err(e) = jsonschema::validate(schema, instance) {
+                println!("Error: {e}");
+                return Err(ValidationError::SchemaValidationFailed);
+            }
         }
         Ok(())
     }
@@ -428,6 +435,7 @@ impl<'a> Validator for RequestParameterValidator<'a> {
                             .request_instance
                             .get(&UniCase::<String>::from(parameter_name))
                         {
+
                             Self::simple_validation(
                                 parameter_schema,
                                 &json!(request_parameter_value),
@@ -662,7 +670,6 @@ mod test {
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::fs;
-    use std::sync::Once;
     use unicase::UniCase;
 
     struct TestParamStruct {
@@ -1213,4 +1220,417 @@ mod test {
             "Pet without required photoUrls field should fail validation with XML content type"
         );
     }
+
+    #[test]
+    fn test_validate_request_query_parameters_no_parameters() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": []
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({"parameters": []}));
+        let query_params = TestParamStruct { data: HashMap::new() };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_required_parameter_present() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "id",
+                                "in": "query",
+                                "required": true,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "id",
+                    "in": "query",
+                    "required": true,
+                    "schema": {
+                        "type": "string"
+                    }
+                }
+            ]
+        }));
+
+        let mut params = HashMap::new();
+        params.insert(UniCase::new("id".to_string()), "123".to_string());
+        let query_params = TestParamStruct { data: params };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_required_parameter_missing() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "id",
+                                "in": "query",
+                                "required": true,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "id",
+                    "in": "query",
+                    "required": true,
+                    "schema": {
+                        "type": "string"
+                    }
+                }
+            ]
+        }));
+
+        let query_params = TestParamStruct { data: HashMap::new() };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_err());
+        match result {
+            Err(ValidationError::RequiredParameterMissing) => (),
+            _ => panic!("Expected RequiredParameterMissing error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_optional_parameter_missing() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "filter",
+                                "in": "query",
+                                "required": false,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "filter",
+                    "in": "query",
+                    "required": false,
+                    "schema": {
+                        "type": "string"
+                    }
+                }
+            ]
+        }));
+
+        let query_params = TestParamStruct { data: HashMap::new() };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_parameter_wrong_type() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "age",
+                                "in": "query",
+                                "required": true,
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "age",
+                    "in": "query",
+                    "required": true,
+                    "schema": {
+                        "type": "integer"
+                    }
+                }
+            ]
+        }));
+
+        let mut params = HashMap::new();
+        params.insert(UniCase::new("age".to_string()), "not-a-number".to_string());
+        let query_params = TestParamStruct { data: params };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_err());
+        println!("err: {:?}", result);
+        match result {
+            Err(ValidationError::InvalidType) => (),
+            _ => panic!("Expected InvalidType error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_multiple_parameters() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "page",
+                                "in": "query",
+                                "required": true,
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            },
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "required": true,
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            },
+                            {
+                                "name": "sort",
+                                "in": "query",
+                                "required": false,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "page",
+                    "in": "query",
+                    "required": true,
+                    "schema": {
+                        "type": "integer"
+                    }
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": true,
+                    "schema": {
+                        "type": "integer"
+                    }
+                },
+                {
+                    "name": "sort",
+                    "in": "query",
+                    "required": false,
+                    "schema": {
+                        "type": "string"
+                    }
+                }
+            ]
+        }));
+
+        let mut params = HashMap::new();
+        params.insert(UniCase::new("page".to_string()), "1".to_string());
+        params.insert(UniCase::new("limit".to_string()), "10".to_string());
+        params.insert(UniCase::new("sort".to_string()), "asc".to_string());
+        let query_params = TestParamStruct { data: params };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+        println!("Error: {:?}", result);
+        // Verify
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_non_query_parameters() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "id",
+                                "in": "path",
+                                "required": true,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            },
+                            {
+                                "name": "filter",
+                                "in": "query",
+                                "required": true,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": {
+                        "type": "string"
+                    }
+                },
+                {
+                    "name": "filter",
+                    "in": "query",
+                    "required": true,
+                    "schema": {
+                        "type": "string"
+                    }
+                }
+            ]
+        }));
+
+        let mut params = HashMap::new();
+        params.insert(UniCase::new("filter".to_string()), "active".to_string());
+        let query_params = TestParamStruct { data: params };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_query_parameters_invalid_schema_structure() {
+        // Setup
+        let spec = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "filter",
+                                "in": "query",
+                                "required": true
+                                // Missing schema
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+        let operation = create_operation(json!({
+            "parameters": [
+                {
+                    "name": "filter",
+                    "in": "query",
+                    "required": true
+                    // Missing schema
+                }
+            ]
+        }));
+
+        let mut params = HashMap::new();
+        params.insert(UniCase::new("filter".to_string()), "active".to_string());
+        let query_params = TestParamStruct { data: params };
+
+        // Execute
+        let result = validator.validate_request_query_parameters(&operation, &query_params);
+
+        // Verify
+        assert!(result.is_err());
+    }
+
 }
