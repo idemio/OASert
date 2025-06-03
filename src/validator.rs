@@ -284,7 +284,7 @@ impl JsonPath {
         self
     }
 
-    fn format_path(&self) -> String {
+    pub(crate) fn format_path(&self) -> String {
         self.0.join(PATH_SEPARATOR)
     }
 }
@@ -347,12 +347,10 @@ pub(crate) trait Validator {
         if let Some(string) = instance.as_str() {
             let instance = OpenApiTypes::convert_string_to_schema_type(schema, string)?;
             if let Err(e) = jsonschema::validate(schema, &instance) {
-                println!("Error: {e}");
                 return Err(ValidationError::SchemaValidationFailed);
             }
         } else {
             if let Err(e) = jsonschema::validate(schema, instance) {
-                println!("Error: {e}");
                 return Err(ValidationError::SchemaValidationFailed);
             }
         }
@@ -609,6 +607,42 @@ impl<'a> RequestScopeValidator<'a> {
     {
         Self { request_instance }
     }
+
+    fn validate_scopes_using_schema(security_definitions: &Value, request_scopes: &HashSet<&str>) -> Result<(), ValidationError> {
+        // get the array of maps
+        let security_definitions =
+            OpenApiTraverser::require_array(security_definitions)?;
+
+        if security_definitions.is_empty() {
+            log::debug!("Definition is empty, scopes automatically pass");
+            return Ok(())
+        }
+
+        for security_definition in security_definitions {
+            // convert to map
+            let security_definition = OpenApiTraverser::require_object(security_definition)?;
+            for (security_schema_name, scope_list) in security_definition {
+                // convert to list
+                let scope_list = OpenApiTraverser::require_array(scope_list)?;
+                let mut scopes_match_schema = true;
+
+                // check to see if the scope is found in our request scopes
+                'scope_match: for scope in scope_list {
+                    let scope = OpenApiTraverser::require_str(scope)?;
+                    if !request_scopes.contains(scope) {
+                        scopes_match_schema = false;
+                        break 'scope_match;
+                    }
+                }
+
+                if scopes_match_schema {
+                    log::debug!("Scopes match {security_schema_name}");
+                    return Ok(())
+                }
+            }
+        }
+        Err(ValidationError::RequiredPropertyMissing)
+    }
 }
 
 impl<'a> Validator for RequestScopeValidator<'a> {
@@ -630,36 +664,19 @@ impl<'a> Validator for RequestScopeValidator<'a> {
         _validation_options: &ValidationOptions,
     ) -> Result<(), ValidationError> {
         let operation = &operation.data;
-        let security_definitions = traverser.get_optional_spec_node(operation, SECURITY_FIELD)?;
-
         let request_scopes: HashSet<&str> =
             self.request_instance.iter().map(|s| s.as_str()).collect();
 
+        let security_definitions = traverser.get_optional_spec_node(operation, SECURITY_FIELD)?;
         if let Some(security_definitions) = security_definitions {
-            // get the array of maps
-            let security_definitions =
-                OpenApiTraverser::require_array(security_definitions.value())?;
-
-            for security_definition in security_definitions {
-                // convert to map
-                let security_definition = OpenApiTraverser::require_object(security_definition)?;
-
-                for (_, scope_list) in security_definition {
-                    // convert to list
-                    let scope_list = OpenApiTraverser::require_array(scope_list)?;
-
-                    // check to see if the scope is found in our request scopes
-                    for scope in scope_list {
-                        let scope = OpenApiTraverser::require_str(scope)?;
-                        if request_scopes.contains(scope) {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
+            return Self::validate_scopes_using_schema(security_definitions.value(), &request_scopes);
         }
 
-        Err(ValidationError::ValueExpected)
+        let global_security_definitions = traverser.get_optional_spec_node(traverser.specification(), SECURITY_FIELD)?;
+        if let Some(security_definitions) = global_security_definitions {
+            return Self::validate_scopes_using_schema(security_definitions.value(), &request_scopes);
+        }
+        Ok(())
     }
 }
 
@@ -691,6 +708,302 @@ mod test {
             &self.data
         }
     }
+
+    #[test]
+    fn test_validate_request_scopes_no_security_requirements() {
+        // Create an operation with no security requirements
+        let operation = create_operation(json!({
+            "operationId": "testOperation"
+            // No security field
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {}
+        })).unwrap();
+
+        // Should pass with empty scopes
+        let scopes = vec![];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+
+        // Should also pass with non-empty scopes (since no security requirements are defined)
+        let scopes = vec!["read:data".to_string(), "write:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_matching_scopes() {
+        // Create an operation with security requirements
+        let operation = create_operation(json!({
+            "operationId": "testOperation",
+            "security": [
+                {
+                    "oauth2": ["read:data", "write:data"]
+                }
+            ]
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "securitySchemes": {
+                    "oauth2": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/oauth/authorize",
+                                "scopes": {
+                                    "read:data": "Read data",
+                                    "write:data": "Write data"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })).unwrap();
+
+        // Should pass with exactly matching scopes
+        let scopes = vec!["read:data".to_string(), "write:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+
+        // Should pass with more scopes than required
+        let scopes = vec!["read:data".to_string(), "write:data".to_string(), "admin:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_missing_scopes() {
+        // Create an operation with security requirements
+        let operation = create_operation(json!({
+            "operationId": "testOperation",
+            "security": [
+                {
+                    "oauth2": ["read:data", "write:data"]
+                }
+            ]
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "securitySchemes": {
+                    "oauth2": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/oauth/authorize",
+                                "scopes": {
+                                    "read:data": "Read data",
+                                    "write:data": "Write data"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })).unwrap();
+
+        // Should fail with incomplete scopes
+        let scopes = vec!["read:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
+
+        // Should fail with empty scopes
+        let scopes = vec![];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_alternative_security_requirements() {
+        // Create an operation with alternative security requirements
+        let operation = create_operation(json!({
+            "operationId": "testOperation",
+            "security": [
+                {
+                    "oauth2": ["read:data", "write:data"]
+                },
+                {
+                    "api_key": []
+                }
+            ]
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "components": {
+                "securitySchemes": {
+                    "oauth2": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/oauth/authorize",
+                                "scopes": {
+                                    "read:data": "Read data",
+                                    "write:data": "Write data"
+                                }
+                            }
+                        }
+                    },
+                    "api_key": {
+                        "type": "apiKey",
+                        "name": "api_key",
+                        "in": "header"
+                    }
+                }
+            }
+        })).unwrap();
+
+        // Should pass with scopes for the first security requirement
+        let scopes = vec!["read:data".to_string(), "write:data".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+        assert!(result.is_ok());
+
+        // Should pass with empty scopes (matching the second security requirement)
+        let scopes = vec![];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_global_security_requirements() {
+        // Create an operation without security requirements but API has global security
+        let operation = create_operation(json!({
+            "operationId": "testOperation"
+            // No security field - should fall back to global security
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "security": [
+                {
+                    "oauth2": ["read:data"]
+                }
+            ],
+            "components": {
+                "securitySchemes": {
+                    "oauth2": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/oauth/authorize",
+                                "scopes": {
+                                    "read:data": "Read data"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })).unwrap();
+
+        // Should pass with matching scopes
+        let scopes = vec!["read:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+
+        // Should fail with empty scopes
+        let scopes = vec![];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_operation_overrides_global_security() {
+        // Create an operation with its own security requirements that override global security
+        let operation = create_operation(json!({
+            "operationId": "testOperation",
+            "security": [
+                {
+                    "oauth2": ["write:data"]
+                }
+            ]
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "security": [
+                {
+                    "oauth2": ["read:data"]
+                }
+            ],
+            "components": {
+                "securitySchemes": {
+                    "oauth2": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/oauth/authorize",
+                                "scopes": {
+                                    "read:data": "Read data",
+                                    "write:data": "Write data"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })).unwrap();
+
+        // Should pass with matching scopes for operation
+        let scopes = vec!["write:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+
+        // Should fail with global scopes that don't match operation scopes
+        let scopes = vec!["read:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_empty_security_array() {
+        // Create an operation with empty security array (explicitly no security)
+        let operation = create_operation(json!({
+            "operationId": "testOperation",
+            "security": []
+        }));
+
+        let validator = OpenApiPayloadValidator::new(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Test API", "version": "1.0.0" },
+            "paths": {},
+            "security": [
+                {
+                    "oauth2": ["read:data"]
+                }
+            ],
+            "components": {
+                "securitySchemes": {
+                    "oauth2": {
+                        "type": "oauth2",
+                        "flows": {
+                            "implicit": {
+                                "authorizationUrl": "https://example.com/oauth/authorize",
+                                "scopes": {
+                                    "read:data": "Read data"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })).unwrap();
+
+        // Should pass with any scopes because security is explicitly disabled
+        let scopes = vec![];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+
+        let scopes = vec!["read:data".to_string()];
+        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
+    }
+
 
     #[test]
     fn test_validate_request_header_params_no_parameters() {
@@ -1436,7 +1749,6 @@ mod test {
 
         // Verify
         assert!(result.is_err());
-        println!("err: {:?}", result);
         match result {
             Err(ValidationError::InvalidType) => (),
             _ => panic!("Expected InvalidType error"),
@@ -1520,7 +1832,6 @@ mod test {
 
         // Execute
         let result = validator.validate_request_query_parameters(&operation, &query_params);
-        println!("Error: {:?}", result);
         // Verify
         assert!(result.is_ok());
     }

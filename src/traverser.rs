@@ -39,6 +39,10 @@ impl OpenApiTraverser {
             resolved_operations: DashMap::new(),
         }
     }
+    
+    pub fn specification(&self) -> &Value {
+        &self.specification
+    }
 
     pub fn get_operation(
         &self,
