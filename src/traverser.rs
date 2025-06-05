@@ -1,12 +1,10 @@
 use crate::types::Operation;
-use crate::{
-    PATH_SEPARATOR, PATHS_FIELD, REF_FIELD,
-};
+use crate::validator::{JsonPath, ValidationError, ValidationErrorKind};
+use crate::{PATHS_FIELD, PATH_SEPARATOR, REF_FIELD};
 use dashmap::{DashMap, Entry};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::validator::{JsonPath, ValidationError, ValidationErrorKind};
 
 type TraverseResult<'a> = Result<SearchResult<'a>, ValidationError>;
 
@@ -32,14 +30,14 @@ pub struct OpenApiTraverser {
 }
 
 impl OpenApiTraverser {
-    pub fn new(specification: Value) -> Self {
+    pub(crate) fn new(specification: Value) -> Self {
         Self {
             specification,
             resolved_references: DashMap::new(),
             resolved_operations: DashMap::new(),
         }
     }
-    
+
     pub fn specification(&self) -> &Value {
         &self.specification
     }
@@ -49,6 +47,12 @@ impl OpenApiTraverser {
         request_path: &str,
         request_method: &str,
     ) -> Result<Arc<Operation>, ValidationError> {
+        let binding = request_method.to_lowercase();
+        let request_method = binding.as_str();
+        println!(
+            "Looking for path: {} and method {}",
+            request_path, request_method
+        );
         log::debug!("Looking for path '{request_path}' and method '{request_method}'");
 
         let entry = self
@@ -58,7 +62,9 @@ impl OpenApiTraverser {
             Entry::Occupied(e) => Ok(e.get().clone()),
             Entry::Vacant(e) => {
                 // Grab all paths from the spec
-                if let Ok(spec_paths) = self.get_required_spec_node(&self.specification, PATHS_FIELD) {
+                if let Ok(spec_paths) =
+                    self.get_required_spec_node(&self.specification, PATHS_FIELD)
+                {
                     let spec_paths = Self::require_object(spec_paths.value())?;
                     for (spec_path, spec_path_methods) in spec_paths {
                         let operations = Self::require_object(spec_path_methods)?;
@@ -74,7 +80,7 @@ impl OpenApiTraverser {
                                 json_path
                                     .add(PATHS_FIELD)
                                     .add(spec_path)
-                                    .add(&request_method.to_lowercase());
+                                    .add(request_method);
 
                                 let operation = Arc::new(Operation {
                                     data: operation.clone(),
@@ -239,7 +245,7 @@ impl OpenApiTraverser {
                 Entry::Occupied(entry) => {
                     println!("Found: {}", ref_string);
                     Ok(SearchResult::Arc(entry.get().clone()))
-                },
+                }
                 Entry::Vacant(entry) => {
                     println!("Ref string {} not found, solving", ref_string);
                     let mut seen_references = HashSet::new();
@@ -249,7 +255,7 @@ impl OpenApiTraverser {
                             let ret = val;
                             entry.insert(ret.clone());
                             ret
-                        },
+                        }
                         SearchResult::Ref(val) => {
                             let res = Arc::new(val.clone());
                             entry.insert(res.clone());
@@ -297,7 +303,10 @@ impl OpenApiTraverser {
 
         let current_schema = match &self.specification.pointer(&complete_path) {
             None => {
-                println!("Could not find pointer path: {}, {}", path, &self.specification);
+                println!(
+                    "Could not find pointer path: {}, {}",
+                    path, &self.specification
+                );
                 return Err(ValidationError::FieldMissing);
             }
             Some(v) => self.resolve_possible_ref(v)?,
@@ -409,5 +418,3 @@ impl OpenApiTraverser {
         }
     }
 }
-
-
