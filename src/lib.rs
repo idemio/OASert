@@ -1,7 +1,7 @@
+pub mod cache;
 pub mod traverser;
 pub mod types;
-mod validator;
-mod cache;
+pub mod validator;
 
 const CONTENT_FIELD: &'static str = "content";
 const SCHEMA_FIELD: &'static str = "schema";
