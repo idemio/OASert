@@ -1,81 +1,80 @@
+# OASert
+
+**OASert** is a high-performance Rust library for runtime validation of HTTP requests against OpenAPI 3.x specifications. It provides a comprehensive suite of tools for traversing, validating, and caching OpenAPI document structures to
+ensure strict compliance with defined API contracts during request processing.
+
 [![codecov](https://codecov.io/gh/idemio/OASert/branch/main/graph/badge.svg)](https://codecov.io/gh/idemio/OASert)
 [![CI Status](https://github.com/idemio/OASert/workflows/Rust/badge.svg)](https://github.com/idemio/OASert/actions)
 
-# OASert
+---
 
-(OAS + Assert)
-Utility library to validate payloads against a provided specification.
+## Core Capabilities
 
-## Validation Use Cases
+- **Comprehensive Request Validation**  
+  Performs rigorous validation of HTTP request elements (payloads, headers, query parameters, path parameters) against OpenAPI v3.x specifications, ensuring complete compliance with defined schemas.
 
-### Simple Specification Validation (no cache)
+- **High-Performance Validator Caching**  
+  Implements a thread-safe, concurrent caching infrastructure powered by `DashMap` (v7.0) that minimizes redundant validator instantiations and optimizes memory usage.
 
-#### Summary
+- **Advanced Specification Traversal**  
+  Provides sophisticated algorithms for navigating complex OpenAPI documents, with robust handling of nested `$ref` references through pointer resolution and circular reference detection.
 
-How to validate in-flight payloads against a single specification.
+- **Validation Error Reporting**  
+  Detailed error reporting with specific categories like missing properties, invalid types, or unsupported schema versions.
 
-#### Example Cases
+- **Supports OpenAPI Drafts**  
+  Includes support for both OpenAPI 3.0.x (Draft 4) and OpenAPI 3.1.x (Draft 2020-12).
 
-- Reverse proxies
-- Sidecar deployments
+---
 
-#### Usage
+## Installation
 
-```rust
+Add `OASert` to your `Cargo.toml`:
 
-use oasert::validator::OpenApiPayloadValidator;
-use serde_json::json;
-use http::Request;
-fn main() {
-    let incoming_request: Request<T> = ...;
-    let my_spec: Value = ...;
-    let validator = OpenApiPayloadValidator::new(my_spec).unwrap();
-    let result = validator.validate_request(&incoming_request, None);
-}
-```
+```toml 
+[dependencies]
+oasert = "0.1.1"
+``` 
 
-### Multiple Specification Validation (with cache)
+---
 
-#### Summary
+## Basic Usage
 
-// TODO
+### Initializing the Validator
 
-#### Example Cases
+1. Parse your OpenAPI specification into a `serde_json::Value`.
+2. Create an `OpenApiPayloadValidator` using the parsed specification.
+3. Pass incoming requests to the validator
 
-- Gateways
-- Proxy Servers/Clients
+See a full example using hyper [here](./examples/hyper-validation/main.rs)
 
-#### Usage
+## Components
 
-// TODO
+### 1. `ValidatorCache`
 
-### Scope Validation (no cache)
+Efficient caching mechanism for validators to avoid repeated instantiations.
 
-#### Summary
+- Insert or retrieve validators dynamically.
+- Clear the cache when needed.
+- Automatically create validators for specific IDs if not cached.
 
-// TODO
+### 2. `OpenApiTraverser`
 
-#### Example Cases
+Utility class to traverse OpenAPI specifications with support for:
 
-- Reverse proxies
-- Sidecar deployments
+- Resolving `$ref` pointers.
+- Fetching required or optional specification nodes.
+- Handling complex paths and parameters.
 
-#### Usage
+### 3. `OpenApiTypes`
 
-// TODO
+Type mapping utility to convert OpenAPI types (`string`, `boolean`, etc.) into native Rust types.
 
-### Scope Validation (with cache)
+### 4. Error Handling
 
-#### Summary
+Comprehensive error handling for:
 
-// TODO
-
-#### Example Cases
-
-- Gateways
-- Proxy Servers/Clients
-
-#### Usage
-
-// TODO
+- Missing parameters or fields.
+- Unsupported specification versions.
+- Invalid schema values or types.
 
