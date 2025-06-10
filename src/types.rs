@@ -1,10 +1,8 @@
 use crate::validator::{JsonPath, ValidationError};
 use jsonschema::Draft;
-use serde_json::{Value, json, Map};
-use std::collections::HashMap;
+use serde_json::{json, Value};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use unicase::UniCase;
 
 #[derive(PartialEq, Debug)]
 pub enum OpenApiTypes {
@@ -29,22 +27,27 @@ impl FromStr for OpenApiTypes {
             "string" => Ok(OpenApiTypes::String),
             "array" => Ok(OpenApiTypes::Array),
             "object" => Ok(OpenApiTypes::Object),
-            &_ => Err(ValidationError::InvalidType)
+            &_ => Err(ValidationError::InvalidType),
         }
     }
 }
 
 impl OpenApiTypes {
-    
-    pub fn convert_string_to_schema_type(schema: &Value, input: &str) -> Result<Value, ValidationError> {
-        let type_field = match schema.get("type").and_then(|type_value| type_value.as_str()) {
+    pub fn convert_string_to_schema_type(
+        schema: &Value,
+        input: &str,
+    ) -> Result<Value, ValidationError> {
+        let type_field = match schema
+            .get("type")
+            .and_then(|type_value| type_value.as_str())
+        {
             None => return Err(ValidationError::FieldMissing),
-            Some(v) => v
+            Some(v) => v,
         };
         let openapi_type = OpenApiTypes::from_str(type_field)?;
         openapi_type.convert_value_to_type(input)
     }
-    
+
     pub fn convert_value_to_type(&self, input: &str) -> Result<Value, ValidationError> {
         match self {
             OpenApiTypes::Null => Ok(json!(Value::Null)),
@@ -52,23 +55,26 @@ impl OpenApiTypes {
             OpenApiTypes::Integer => Self::convert_to_type::<i64>(input),
             OpenApiTypes::Number => Self::convert_to_type::<f64>(input),
             OpenApiTypes::String => Self::convert_to_type::<String>(input),
-//            OpenApiTypes::Array => Self::convert_to_type::<Vec<Value>>(input),
-//            OpenApiTypes::Object => Self::convert_to_type::<Map<String, Value>>(input)
-            _ => Err(ValidationError::UnsupportedSpecVersion)
+            //            OpenApiTypes::Array => Self::convert_to_type::<Vec<Value>>(input),
+            //            OpenApiTypes::Object => Self::convert_to_type::<Map<String, Value>>(input)
+            _ => Err(ValidationError::UnsupportedSpecVersion),
         }
     }
 
-    fn convert_to_type<T: for<'de> serde::de::Deserialize<'de> + serde::Serialize + std::str::FromStr>(
+    fn convert_to_type<
+        T: for<'de> serde::de::Deserialize<'de> + serde::Serialize + std::str::FromStr,
+    >(
         input: &str,
     ) -> Result<Value, ValidationError> {
         let converted_value: T = match input.parse::<T>() {
             Ok(val) => val,
-            Err(_) => return Err(ValidationError::InvalidType)
+            Err(_) => return Err(ValidationError::InvalidType),
         };
         Ok(json!(converted_value))
     }
 }
 
+#[derive(Debug)]
 pub struct Operation {
     pub(crate) data: Value,
     pub(crate) path: JsonPath,
@@ -120,12 +126,4 @@ impl OpenApiVersion {
             OpenApiVersion::V31x => Draft::Draft202012,
         }
     }
-}
-
-pub trait RequestParamData {
-    fn get(&self) -> &HashMap<UniCase<String>, String>;
-}
-
-pub trait RequestBodyData {
-    fn get(&self) -> &Value;
 }

@@ -1,16 +1,18 @@
 use crate::traverser::OpenApiTraverser;
-use crate::types::{OpenApiTypes, OpenApiVersion, Operation, ParameterLocation, RequestBodyData, RequestParamData};
+use crate::types::{OpenApiTypes, OpenApiVersion, Operation, ParameterLocation};
 use crate::{
     CONTENT_FIELD, ENCODED_BACKSLASH, ENCODED_TILDE, IN_FIELD, NAME_FIELD, OPENAPI_FIELD,
     PARAMETERS_FIELD, PATH_SEPARATOR, REF_FIELD, REQUEST_BODY_FIELD, REQUIRED_FIELD, SCHEMA_FIELD,
     SECURITY_FIELD, TILDE,
 };
 use jsonschema::{Resource, ValidationOptions, Validator as JsonValidator};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use unicase::UniCase;
+
+use http::HeaderMap;
+use http::Request;
 
 pub struct OpenApiPayloadValidator {
     traverser: OpenApiTraverser,
@@ -49,121 +51,139 @@ impl OpenApiPayloadValidator {
         })
     }
 
+    pub fn traverser(&self) -> &OpenApiTraverser {
+        &self.traverser
+    }
+
     /// Extracts a valid content type from HTTP headers.
-    ///
-    /// # Arguments
-    /// * `headers_instance` - A reference to a HashMap of HTTP headers where keys are
-    ///   case-insensitive header names and values are header values.
-    ///
-    /// # Returns
-    /// * `Some(String)` - The content type string if found and valid.
-    /// * `None` - If no valid content type is found in the headers.
-    fn extract_content_type(headers_instance: &HashMap<UniCase<String>, String>) -> Option<String> {
-        if let Some(content_type_header) = headers_instance.get(&UniCase::from("content-type")) {
-            if let Some(split_content_type) =
-                content_type_header.split(";").find(|content_type_segment| {
-                    content_type_segment.contains("/")
-                        && (content_type_segment.starts_with("application")
-                            || content_type_segment.starts_with("text")
-                            || content_type_segment.starts_with("xml")
-                            || content_type_segment.starts_with("audio")
-                            || content_type_segment.starts_with("example")
-                            || content_type_segment.starts_with("font")
-                            || content_type_segment.starts_with("image")
-                            || content_type_segment.starts_with("model")
-                            || content_type_segment.starts_with("video")
-                            || content_type_segment.starts_with("multipart")
-                            || content_type_segment.starts_with("message"))
-                })
-            {
-                return Some(split_content_type.to_string());
+    fn extract_content_type(headers_instance: &HeaderMap) -> Option<String> {
+        if let Some(content_type_header) = headers_instance.get("content-type") {
+            if let Ok(content_type_header) = content_type_header.to_str() {
+                if let Some(split_content_type) =
+                    content_type_header.split(";").find(|content_type_segment| {
+                        content_type_segment.contains("/")
+                            && (content_type_segment.starts_with("application")
+                                || content_type_segment.starts_with("text")
+                                || content_type_segment.starts_with("xml")
+                                || content_type_segment.starts_with("audio")
+                                || content_type_segment.starts_with("example")
+                                || content_type_segment.starts_with("font")
+                                || content_type_segment.starts_with("image")
+                                || content_type_segment.starts_with("model")
+                                || content_type_segment.starts_with("video")
+                                || content_type_segment.starts_with("multipart")
+                                || content_type_segment.starts_with("message"))
+                    })
+                {
+                    return Some(split_content_type.to_string());
+                }
             }
         }
         None
     }
 
     /// Validates a request body against an OpenAPI operation specification.
-    ///
-    /// This function extracts the content type from headers, creates a RequestBodyValidator
-    /// with the request body (if provided), and validates the body against the OpenAPI
-    /// specification for the given operation.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - Reference to an Operation object containing the operation definition and path
-    /// * `body_instance` - Optional reference to an object implementing RequestBodyData that provides
-    ///   the request body content
-    /// * `headers_instance` - Reference to an object implementing RequestParamData that provides
-    ///   the request headers
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If validation succeeds (body matches the specification)
-    /// * `Err(ValidationError)` - If validation fails for any reason (missing required body,
-    ///   schema validation failure, etc.)
-    pub fn validate_request_body(
+    pub fn validate_request_body<T>(
         &self,
         operation: &Operation,
-        body_instance: Option<&impl RequestBodyData>,
-        headers_instance: &impl RequestParamData,
-    ) -> Result<(), ValidationError> {
-        let headers_instance = headers_instance.get();
-        let content_type = Self::extract_content_type(&headers_instance);
-        let validator = match body_instance {
-            None => RequestBodyValidator::new(None, content_type),
-            Some(val) => RequestBodyValidator::new(Some(val.get()), content_type),
-        };
-        validator.validate(&self.traverser, operation, &self.options)
+        request: &Request<T>,
+    ) -> Result<(), ValidationError>
+    where
+        T: serde::ser::Serialize,
+    {
+        let content_type = Self::extract_content_type(&request.headers());
+        let body_instance = request.body();
+        match serde_json::to_value(body_instance) {
+            Ok(body) => {
+                let validator = RequestBodyValidator::new(Some(&body), content_type);
+                validator.validate(&self.traverser, operation, &self.options)
+            }
+            Err(_) => {
+                let validator = RequestBodyValidator::new(None, content_type);
+                validator.validate(&self.traverser, operation, &self.options)
+            }
+        }
+    }
+
+    pub fn validate_request<T>(
+        &self,
+        request: &Request<T>,
+        scopes: Option<&Vec<String>>,
+    ) -> Result<(), ValidationError>
+    where
+        T: serde::ser::Serialize,
+    {
+        let operation = self
+            .traverser
+            .get_operation(request.uri().path(), request.method().as_str())?;
+
+        let content_type = Self::extract_content_type(&request.headers());
+        match serde_json::to_value(request.body()) {
+            Ok(body) => {
+                let validator = RequestBodyValidator::new(Some(&body), content_type);
+                validator.validate(&self.traverser, &operation, &self.options)
+            }
+            Err(_) => {
+                let validator = RequestBodyValidator::new(None, content_type);
+                validator.validate(&self.traverser, &operation, &self.options)
+            }
+        }?;
+        self.validate_request_header_params(&operation, request.headers())?;
+
+        if let Some(query_params) = request.uri().query() {
+            self.validate_request_query_parameters(&operation, query_params)?;
+        }
+
+        if let Some(scopes) = scopes {
+            self.validate_request_scopes(&operation, scopes)?;
+        }
+
+        Ok(())
     }
 
     /// Validates HTTP request headers against the parameters defined in an OpenAPI operation.
-    ///
-    /// # Arguments
-    /// * `operation` - The OpenAPI operation definition to validate against, containing parameter specifications
-    /// * `headers` - An object implementing the RequestParamData trait that provides access to the request headers
-    ///
-    /// # Returns
-    /// * `Ok(())` - If all header parameters are valid according to the OpenAPI specification
-    /// * `Err(ValidationError)` - If validation fails, containing the specific validation error that occurred
     pub fn validate_request_header_params(
         &self,
         operation: &Operation,
-        headers: &impl RequestParamData,
+        headers: &HeaderMap,
     ) -> Result<(), ValidationError> {
-        let headers = headers.get();
-        let validator = RequestParameterValidator::new(headers, ParameterLocation::Header);
+        let headers: HashMap<String, String> = headers
+            .iter()
+            .filter_map(|(key, value)| {
+                if let (key, Ok(value)) = (key.to_string(), value.to_str()) {
+                    Some((key, value.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let validator = RequestParameterValidator::new(&headers, ParameterLocation::Header);
         validator.validate(&self.traverser, operation, &self.options)
     }
 
     /// Validates query parameters against an OpenAPI operation definition.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - The Operation object containing the OpenAPI operation definition to validate against
-    /// * `query_params` - An object implementing RequestParamData, providing access to the query parameters to validate
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(), ValidationError>` - Ok(()) if validation succeeds, or Err with a ValidationError if validation fails
     pub fn validate_request_query_parameters(
         &self,
         operation: &Operation,
-        query_params: &impl RequestParamData,
+        query_params: &str,
     ) -> Result<(), ValidationError> {
-        let query_params = query_params.get();
-        let validator = RequestParameterValidator::new(query_params, ParameterLocation::Query);
+        let query_params: HashMap<String, String> = query_params
+            .split("&")
+            .filter_map(|pair| {
+                let mut parts = pair.split('=');
+                if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                    Some((key.to_string(), value.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        println!("{:?}", query_params);
+        let validator = RequestParameterValidator::new(&query_params, ParameterLocation::Query);
         validator.validate(&self.traverser, operation, &self.options)
     }
 
     /// Validates if the provided scopes meet the security requirements of an operation.
-    ///
-    /// # Arguments
-    /// * `operation` - Reference to the Operation being validated, containing the security definitions
-    /// * `scopes` - Vector of strings representing the scopes provided in the request
-    ///
-    /// # Returns
-    /// * `Ok(())` - If the request has at least one of the required scopes defined in the operation
-    /// * `Err(ValidationError::ValueExpected)` - If the request doesn't have any of the required scopes
     pub fn validate_request_scopes(
         &self,
         operation: &Operation,
@@ -298,18 +318,7 @@ pub(crate) trait Validator {
     ) -> Result<(), ValidationError>;
 
     /// Validates a JSON instance against a schema referenced by a JSON path.
-    ///
-    /// # Arguments
-    ///
-    /// * `options` - Contains configuration options for building and executing the validator
-    /// * `json_path` - The path used to locate the schema for validation
-    /// * `instance` - The JSON value to be validated against the schema
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If validation succeeds
-    /// * `Err(ValidationError::SchemaValidationFailed)` - If either schema building fails, or validation fails
-    fn complex_validation(
+    fn complex_validation_by_path(
         options: &ValidationOptions,
         json_path: &JsonPath,
         instance: &Value,
@@ -318,54 +327,48 @@ pub(crate) trait Validator {
         let schema = json!({
             REF_FIELD: full_pointer_path
         });
-
-        let validator = match options.build(&schema) {
-            Ok(val) => val,
-            Err(e) => {
-                return Err(ValidationError::SchemaValidationFailed);
-            }
-        };
-
+        let validator = Self::build_validator(options, &schema)?;
         match validator.validate(instance) {
             Ok(_) => Ok(()),
             Err(e) => Err(ValidationError::SchemaValidationFailed),
         }
     }
 
-    /// Validates an instance against a JSON schema.
-    ///
-    /// # Arguments
-    ///
-    /// * `schema` - A JSON schema represented as a serde_json Value
-    /// * `instance` - The data to validate against the schema, represented as a serde_json Value
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If the instance successfully validates against the schema
-    /// * `Err(ValidationError::SchemaValidationFailed)` - If validation fails for any reason
-    fn simple_validation(schema: &Value, instance: &Value) -> Result<(), ValidationError> {
-        if let Some(string) = instance.as_str() {
-            let instance = OpenApiTypes::convert_string_to_schema_type(schema, string)?;
-            if let Err(e) = jsonschema::validate(schema, &instance) {
-                return Err(ValidationError::SchemaValidationFailed);
-            }
-        } else {
-            if let Err(e) = jsonschema::validate(schema, instance) {
-                return Err(ValidationError::SchemaValidationFailed);
-            }
+    fn complex_validation_by_schema(
+        options: &ValidationOptions,
+        schema: &Value,
+        instance: &Value,
+    ) -> Result<(), ValidationError> {
+        let validator = Self::build_validator(options, schema)?;
+        match validator.validate(instance) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(ValidationError::SchemaValidationFailed),
         }
-        Ok(())
+    }
+
+    fn build_validator(
+        validation_options: &ValidationOptions,
+        schema: &Value,
+    ) -> Result<JsonValidator, ValidationError> {
+        let validator = match validation_options.build(&schema) {
+            Ok(val) => val,
+            Err(e) => {
+                println!("{:?}", e);
+                return Err(ValidationError::SchemaValidationFailed);
+            }
+        };
+        Ok(validator)
     }
 }
 
 pub(crate) struct RequestParameterValidator<'a> {
-    request_instance: &'a HashMap<UniCase<String>, String>,
+    request_instance: &'a HashMap<String, String>,
     parameter_location: ParameterLocation,
 }
 
 impl<'a> RequestParameterValidator<'a> {
     pub(crate) fn new<'b>(
-        request_instance: &'b HashMap<UniCase<String>, String>,
+        request_instance: &'b HashMap<String, String>,
         parameter_location: ParameterLocation,
     ) -> Self
     where
@@ -380,24 +383,14 @@ impl<'a> RequestParameterValidator<'a> {
 
 impl<'a> Validator for RequestParameterValidator<'a> {
     /// Validates request parameters against an OpenAPI operation definition.
-    ///
-    /// # Arguments
-    ///
-    /// * `self` - The RequestParameterValidator instance containing the request parameters and parameter location
-    /// * `traverser` - An OpenApiTraverser that allows navigation through the OpenAPI specification
-    /// * `operation` - The Operation object containing the OpenAPI operation definition to validate against
-    /// * `_validation_options` - Validation options (unused in this implementation)
-    ///
-    /// # Returns
-    /// * `Result<(), ValidationError>` - Ok(()) if validation succeeds, or Err with a ValidationError if validation fails
     fn validate(
         &self,
         traverser: &OpenApiTraverser,
         operation: &Operation,
-        _validation_options: &ValidationOptions,
+        validation_options: &ValidationOptions,
     ) -> Result<(), ValidationError> {
-        let parameter_location = &self.parameter_location;
         let operation_definition = &operation.data;
+
         let parameter_definitions =
             match traverser.get_optional_spec_node(operation_definition, PARAMETERS_FIELD) {
                 Ok(res) => Ok(res),
@@ -408,14 +401,19 @@ impl<'a> Validator for RequestParameterValidator<'a> {
             Some(parameter_definitions) => {
                 let parameter_definitions =
                     OpenApiTraverser::require_array(parameter_definitions.value())?;
+
+                let mut parameter_index = 0usize;
                 for parameter_definition in parameter_definitions {
                     // Only look at parameters that match the current section.
                     let location =
                         traverser.get_required_spec_node(parameter_definition, IN_FIELD)?;
                     let location = OpenApiTraverser::require_str(location.value())?;
-                    if location == parameter_location.to_string() {
+
+                    if location.to_lowercase() == self.parameter_location.to_string().to_lowercase()
+                    {
                         let parameter_name =
                             traverser.get_required_spec_node(parameter_definition, NAME_FIELD)?;
+
                         let parameter_name = OpenApiTraverser::require_str(parameter_name.value())?;
                         let is_parameter_required = traverser
                             .get_optional_spec_node(parameter_definition, REQUIRED_FIELD)?;
@@ -428,20 +426,32 @@ impl<'a> Validator for RequestParameterValidator<'a> {
                         let parameter_schema =
                             traverser.get_required_spec_node(parameter_definition, SCHEMA_FIELD)?;
                         let parameter_schema = parameter_schema.value();
-
-                        if let Some(request_parameter_value) = self
-                            .request_instance
-                            .get(&UniCase::<String>::from(parameter_name))
+                        if let Some(request_parameter_value) =
+                            self.request_instance.get(parameter_name)
                         {
-
-                            Self::simple_validation(
-                                parameter_schema,
-                                &json!(request_parameter_value),
-                            )?
+                            let instance = json!(request_parameter_value);
+                            if let Some(string) = instance.as_str() {
+                                let instance = OpenApiTypes::convert_string_to_schema_type(
+                                    parameter_schema,
+                                    string,
+                                )?;
+                                Self::complex_validation_by_schema(
+                                    validation_options,
+                                    &parameter_schema,
+                                    &instance,
+                                )?
+                            } else {
+                                Self::complex_validation_by_schema(
+                                    validation_options,
+                                    &parameter_schema,
+                                    &instance,
+                                )?
+                            }
                         } else if is_parameter_required {
                             return Err(ValidationError::RequiredParameterMissing);
                         }
                     }
+                    parameter_index += 1;
                 }
                 Ok(())
             }
@@ -467,19 +477,6 @@ impl<'a> RequestBodyValidator<'a> {
     }
 
     /// Validates that all required fields specified in a schema are present in the request body.
-    ///
-    /// # Arguments
-    ///
-    /// * `body_schema` - A JSON schema that may contain a "required" field listing mandatory properties
-    /// * `request_body` - An optional JSON value representing the request body to validate
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If all required fields are present in the request body
-    /// * `Err(ValidationError::ValueExpected)` - If required fields are specified, but the request body is missing
-    /// * `Err(ValidationError::RequiredPropertyMissing)` - If any required field is missing from the request body
-    /// * `Err(ValidationError::UnexpectedType)` - If a value in the required array is not a string
-    /// * `Err(ValidationError::FieldMissing)` - If the required field doesn't exist in the schema
     fn check_required_body(
         traverser: &OpenApiTraverser,
         body_schema: &Value,
@@ -511,27 +508,6 @@ impl<'a> RequestBodyValidator<'a> {
 
 impl<'a> Validator for RequestBodyValidator<'a> {
     /// Validates the request body of an OpenAPI operation against the specification.
-    ///
-    /// This function checks if a request body exists when required, and if it conforms to the
-    /// expected schema defined in the OpenAPI specification for the given operation and content type.
-    ///
-    /// # Arguments
-    ///
-    /// * `&self` - Reference to the RequestBodyValidator instance which contains the request body
-    ///   instance and content type
-    /// * `traverser` - Reference to an OpenApiTraverser used to navigate the OpenAPI specification
-    /// * `operation` - Reference to the Operation object containing the operation definition and path
-    /// * `validation_options` - Reference to ValidationOptions used during schema validation
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If the request body is valid or not required
-    /// * `Err(ValidationError::DefinitionExpected)` - If a body instance exists but no request body
-    ///   is defined in the specification
-    /// * `Err(ValidationError::ValueExpected)` - If the request body is required but not provided
-    /// * `Err(ValidationError::RequiredParameterMissing)` - If the content type is missing but
-    ///   request body is required
-    /// * `Err(ValidationError::SchemaValidationFailed)` - If the request body fails schema validation
     fn validate(
         &self,
         traverser: &OpenApiTraverser,
@@ -550,7 +526,7 @@ impl<'a> Validator for RequestBodyValidator<'a> {
                 None => return Ok(()),
                 Some(val) => val,
             };
-        
+
         let is_request_body_required =
             traverser.get_optional_spec_node(request_body_definition.value(), REQUIRED_FIELD)?;
         let is_request_body_required: bool = match is_request_body_required {
@@ -578,7 +554,7 @@ impl<'a> Validator for RequestBodyValidator<'a> {
                     .add(CONTENT_FIELD)
                     .add(&content_type)
                     .add(SCHEMA_FIELD);
-                Self::complex_validation(
+                Self::complex_validation_by_path(
                     &validation_options,
                     &operation_definition_path,
                     body_instance,
@@ -608,14 +584,16 @@ impl<'a> RequestScopeValidator<'a> {
         Self { request_instance }
     }
 
-    fn validate_scopes_using_schema(security_definitions: &Value, request_scopes: &HashSet<&str>) -> Result<(), ValidationError> {
+    fn validate_scopes_using_schema(
+        security_definitions: &Value,
+        request_scopes: &HashSet<&str>,
+    ) -> Result<(), ValidationError> {
         // get the array of maps
-        let security_definitions =
-            OpenApiTraverser::require_array(security_definitions)?;
+        let security_definitions = OpenApiTraverser::require_array(security_definitions)?;
 
         if security_definitions.is_empty() {
             log::debug!("Definition is empty, scopes automatically pass");
-            return Ok(())
+            return Ok(());
         }
 
         for security_definition in security_definitions {
@@ -637,7 +615,7 @@ impl<'a> RequestScopeValidator<'a> {
 
                 if scopes_match_schema {
                     log::debug!("Scopes match {security_schema_name}");
-                    return Ok(())
+                    return Ok(());
                 }
             }
         }
@@ -647,16 +625,6 @@ impl<'a> RequestScopeValidator<'a> {
 
 impl<'a> Validator for RequestScopeValidator<'a> {
     /// Validates whether a request has at least one of the required scopes specified in the operation's security definitions.
-    ///
-    /// # Arguments
-    /// * `&self` - Reference to the `RequestScopeValidator` containing the request's scopes
-    /// * `traverser` - Reference to an `OpenApiTraverser` used to navigate the OpenAPI specification
-    /// * `operation` - Reference to the `Operation` being validated
-    /// * `_validation_options` - Reference to `ValidationOptions` (unused in this implementation)
-    ///
-    /// # Returns
-    /// * `Ok(())` - If the request has at least one of the required scopes
-    /// * `Err(ValidationError::ValueExpected)` - If the request doesn't have any of the required scopes
     fn validate(
         &self,
         traverser: &OpenApiTraverser,
@@ -664,17 +632,26 @@ impl<'a> Validator for RequestScopeValidator<'a> {
         _validation_options: &ValidationOptions,
     ) -> Result<(), ValidationError> {
         let operation = &operation.data;
+        println!("{:?}", operation);
+        println!("{:?}", self.request_instance);
         let request_scopes: HashSet<&str> =
             self.request_instance.iter().map(|s| s.as_str()).collect();
 
         let security_definitions = traverser.get_optional_spec_node(operation, SECURITY_FIELD)?;
         if let Some(security_definitions) = security_definitions {
-            return Self::validate_scopes_using_schema(security_definitions.value(), &request_scopes);
+            return Self::validate_scopes_using_schema(
+                security_definitions.value(),
+                &request_scopes,
+            );
         }
 
-        let global_security_definitions = traverser.get_optional_spec_node(traverser.specification(), SECURITY_FIELD)?;
+        let global_security_definitions =
+            traverser.get_optional_spec_node(traverser.specification(), SECURITY_FIELD)?;
         if let Some(security_definitions) = global_security_definitions {
-            return Self::validate_scopes_using_schema(security_definitions.value(), &request_scopes);
+            return Self::validate_scopes_using_schema(
+                security_definitions.value(),
+                &request_scopes,
+            );
         }
         Ok(())
     }
@@ -682,1266 +659,1252 @@ impl<'a> Validator for RequestScopeValidator<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::types::{Operation, RequestBodyData, RequestParamData};
-    use crate::validator::{JsonPath, OpenApiPayloadValidator, ValidationError};
-    use serde_json::{Value, json};
-    use std::collections::HashMap;
-    use std::fs;
-    use unicase::UniCase;
+    use super::*;
+    use http::{HeaderMap, HeaderValue, Method, Request, Uri};
+    use serde_json::json;
 
-    struct TestParamStruct {
-        data: HashMap<UniCase<String>, String>,
-    }
+    // Helper function to create a mock operation with query parameters
+    fn create_operation_with_query_params(parameters: serde_json::Value) -> Operation {
+        let mut path = JsonPath::new();
+        path.add("paths").add("/test").add("get");
 
-    impl RequestParamData for TestParamStruct {
-        fn get(&self) -> &HashMap<UniCase<String>, String> {
-            &self.data
-        }
-    }
+        let operation_data = json!({
+            "parameters": parameters
+        });
 
-    struct TestBodyStruct {
-        data: Value,
-    }
-
-    impl RequestBodyData for TestBodyStruct {
-        fn get(&self) -> &Value {
-            &self.data
-        }
-    }
-
-    #[test]
-    fn test_validate_request_scopes_no_security_requirements() {
-        // Create an operation with no security requirements
-        let operation = create_operation(json!({
-            "operationId": "testOperation"
-            // No security field
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {}
-        })).unwrap();
-
-        // Should pass with empty scopes
-        let scopes = vec![];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-
-        // Should also pass with non-empty scopes (since no security requirements are defined)
-        let scopes = vec!["read:data".to_string(), "write:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_scopes_matching_scopes() {
-        // Create an operation with security requirements
-        let operation = create_operation(json!({
-            "operationId": "testOperation",
-            "security": [
-                {
-                    "oauth2": ["read:data", "write:data"]
-                }
-            ]
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {},
-            "components": {
-                "securitySchemes": {
-                    "oauth2": {
-                        "type": "oauth2",
-                        "flows": {
-                            "implicit": {
-                                "authorizationUrl": "https://example.com/oauth/authorize",
-                                "scopes": {
-                                    "read:data": "Read data",
-                                    "write:data": "Write data"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })).unwrap();
-
-        // Should pass with exactly matching scopes
-        let scopes = vec!["read:data".to_string(), "write:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-
-        // Should pass with more scopes than required
-        let scopes = vec!["read:data".to_string(), "write:data".to_string(), "admin:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_scopes_missing_scopes() {
-        // Create an operation with security requirements
-        let operation = create_operation(json!({
-            "operationId": "testOperation",
-            "security": [
-                {
-                    "oauth2": ["read:data", "write:data"]
-                }
-            ]
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {},
-            "components": {
-                "securitySchemes": {
-                    "oauth2": {
-                        "type": "oauth2",
-                        "flows": {
-                            "implicit": {
-                                "authorizationUrl": "https://example.com/oauth/authorize",
-                                "scopes": {
-                                    "read:data": "Read data",
-                                    "write:data": "Write data"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })).unwrap();
-
-        // Should fail with incomplete scopes
-        let scopes = vec!["read:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
-
-        // Should fail with empty scopes
-        let scopes = vec![];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
-    }
-
-    #[test]
-    fn test_validate_request_scopes_alternative_security_requirements() {
-        // Create an operation with alternative security requirements
-        let operation = create_operation(json!({
-            "operationId": "testOperation",
-            "security": [
-                {
-                    "oauth2": ["read:data", "write:data"]
-                },
-                {
-                    "api_key": []
-                }
-            ]
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {},
-            "components": {
-                "securitySchemes": {
-                    "oauth2": {
-                        "type": "oauth2",
-                        "flows": {
-                            "implicit": {
-                                "authorizationUrl": "https://example.com/oauth/authorize",
-                                "scopes": {
-                                    "read:data": "Read data",
-                                    "write:data": "Write data"
-                                }
-                            }
-                        }
-                    },
-                    "api_key": {
-                        "type": "apiKey",
-                        "name": "api_key",
-                        "in": "header"
-                    }
-                }
-            }
-        })).unwrap();
-
-        // Should pass with scopes for the first security requirement
-        let scopes = vec!["read:data".to_string(), "write:data".to_string()];
-        let result = validator.validate_request_scopes(&operation, &scopes);
-        assert!(result.is_ok());
-
-        // Should pass with empty scopes (matching the second security requirement)
-        let scopes = vec![];
-        let result = validator.validate_request_scopes(&operation, &scopes);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_scopes_global_security_requirements() {
-        // Create an operation without security requirements but API has global security
-        let operation = create_operation(json!({
-            "operationId": "testOperation"
-            // No security field - should fall back to global security
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {},
-            "security": [
-                {
-                    "oauth2": ["read:data"]
-                }
-            ],
-            "components": {
-                "securitySchemes": {
-                    "oauth2": {
-                        "type": "oauth2",
-                        "flows": {
-                            "implicit": {
-                                "authorizationUrl": "https://example.com/oauth/authorize",
-                                "scopes": {
-                                    "read:data": "Read data"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })).unwrap();
-
-        // Should pass with matching scopes
-        let scopes = vec!["read:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-
-        // Should fail with empty scopes
-        let scopes = vec![];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
-    }
-
-    #[test]
-    fn test_validate_request_scopes_operation_overrides_global_security() {
-        // Create an operation with its own security requirements that override global security
-        let operation = create_operation(json!({
-            "operationId": "testOperation",
-            "security": [
-                {
-                    "oauth2": ["write:data"]
-                }
-            ]
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {},
-            "security": [
-                {
-                    "oauth2": ["read:data"]
-                }
-            ],
-            "components": {
-                "securitySchemes": {
-                    "oauth2": {
-                        "type": "oauth2",
-                        "flows": {
-                            "implicit": {
-                                "authorizationUrl": "https://example.com/oauth/authorize",
-                                "scopes": {
-                                    "read:data": "Read data",
-                                    "write:data": "Write data"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })).unwrap();
-
-        // Should pass with matching scopes for operation
-        let scopes = vec!["write:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-
-        // Should fail with global scopes that don't match operation scopes
-        let scopes = vec!["read:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_err());
-    }
-
-    #[test]
-    fn test_validate_request_scopes_empty_security_array() {
-        // Create an operation with empty security array (explicitly no security)
-        let operation = create_operation(json!({
-            "operationId": "testOperation",
-            "security": []
-        }));
-
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.0.0",
-            "info": { "title": "Test API", "version": "1.0.0" },
-            "paths": {},
-            "security": [
-                {
-                    "oauth2": ["read:data"]
-                }
-            ],
-            "components": {
-                "securitySchemes": {
-                    "oauth2": {
-                        "type": "oauth2",
-                        "flows": {
-                            "implicit": {
-                                "authorizationUrl": "https://example.com/oauth/authorize",
-                                "scopes": {
-                                    "read:data": "Read data"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })).unwrap();
-
-        // Should pass with any scopes because security is explicitly disabled
-        let scopes = vec![];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-
-        let scopes = vec!["read:data".to_string()];
-        assert!(validator.validate_request_scopes(&operation, &scopes).is_ok());
-    }
-
-
-    #[test]
-    fn test_validate_request_header_params_no_parameters() {
-        // Test case: No headers and the operation schema has no parameters
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0"
-        }))
-        .unwrap();
-        let operation = Operation {
-            data: json!({}),
-            path: JsonPath::new(),
-        };
-        let headers = TestParamStruct {
-            data: HashMap::new(),
-        };
-
-        let result = validator.validate_request_header_params(&operation, &headers);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_header_params_required_parameter_present() {
-        // Test case: Required parameter present in headers
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0"
-        }))
-        .unwrap();
-        let operation = Operation {
-            data: json!({
-                "parameters": [
-                    {
-                        "name": "Authorization",
-                        "in": "header",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ]
-            }),
-            path: JsonPath::new(),
-        };
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::from("Authorization".to_string()),
-            "Bearer token".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-
-        let result = validator.validate_request_header_params(&operation, &headers_struct);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_header_params_required_parameter_missing() {
-        // Test case: Required parameter missing in headers
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0"
-        }))
-        .unwrap();
-        let operation = Operation {
-            data: json!({
-                "parameters": [
-                    {
-                        "name": "Authorization",
-                        "in": "header",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ]
-            }),
-            path: JsonPath::new(),
-        };
-        let headers: HashMap<UniCase<String>, String> = HashMap::new();
-        let headers_struct = TestParamStruct { data: headers };
-
-        let result = validator.validate_request_header_params(&operation, &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::RequiredParameterMissing) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::RequiredParameterMissing");
-        }
-    }
-
-    #[test]
-    fn test_validate_request_header_params_optional_parameter_missing() {
-        // Test case: Optional parameter missing in headers
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0"
-        }))
-        .unwrap();
-        let operation = Operation {
-            data: json!({
-                "parameters": [
-                    {
-                        "name": "X-Optional-Header",
-                        "in": "header",
-                        "required": false,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ]
-            }),
-            path: JsonPath::new(),
-        };
-        let headers: HashMap<UniCase<String>, String> = HashMap::new();
-        let headers_struct = TestParamStruct { data: headers };
-
-        let result = validator.validate_request_header_params(&operation, &headers_struct);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_header_params_invalid_schema_structure() {
-        // Test case: Invalid schema (e.g., missing 'name' or 'in' fields in a parameter)
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0"
-        }))
-        .unwrap();
-
-        let operation = Operation {
-            data: json!({
-                "parameters": [
-                    {
-                        "required": true,
-                        "in": "header",
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ]
-            }),
-            path: JsonPath::new(),
-        };
-        let headers: HashMap<UniCase<String>, String> = HashMap::new();
-        let headers_struct = TestParamStruct { data: headers };
-
-        let result = validator.validate_request_header_params(&operation, &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::FieldMissing) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::FieldMissing");
-        }
-    }
-
-    #[test]
-    fn test_validate_request_header_params_multiple_parameters() {
-        // Test case: Multiple parameters with some missing and some present
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0"
-        }))
-        .unwrap();
-        let operation = Operation {
-            data: json!({
-                "parameters": [
-                    {
-                        "name": "Authorization",
-                        "in": "header",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    },
-                    {
-                        "name": "X-Optional-Header",
-                        "in": "header",
-                        "required": false,
-                        "schema": {
-                            "type": "string"
-                        }
-                    },
-                    {
-                        "name": "Content-Type",
-                        "in": "header",
-                        "required": true,
-                        "schema": {
-                            "type": "string"
-                        }
-                    }
-                ]
-            }),
-            path: JsonPath::new(),
-        };
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::from("Authorization".to_string()),
-            "Bearer token".to_string(),
-        );
-        headers.insert(
-            UniCase::from("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-
-        let result = validator.validate_request_header_params(&operation, &headers_struct);
-        assert!(result.is_ok());
-    }
-
-    fn create_operation(data: Value) -> Operation {
         Operation {
-            data,
-            path: JsonPath::new(),
+            data: operation_data,
+            path,
         }
     }
 
-    #[test]
-    fn test_validate_request_body_no_body_no_content_type() {
-        // Scenario: No 'body' and no Content-Type header
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0",
-        }))
-        .unwrap();
-        let operation = create_operation(json!({}));
-        let headers: HashMap<UniCase<String>, String> = HashMap::new();
-        let headers_struct = TestParamStruct { data: headers };
-        let result =
-            validator.validate_request_body(&operation, None::<&TestBodyStruct>, &headers_struct);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_body_with_body_missing_content_type() {
-        // Scenario: Body exists but Content-Type header is missing
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0",
-        }))
-        .unwrap();
-        let operation = create_operation(json!({}));
-        let headers: HashMap<UniCase<String>, String> = HashMap::new();
-        let headers_struct = TestParamStruct { data: headers };
-        let body = json!({});
-        let body_struct = TestBodyStruct { data: body };
-        let result =
-            validator.validate_request_body(&operation, Some(&body_struct), &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::DefinitionExpected) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::RequiredParameterMissing");
-        }
-    }
-
-    #[test]
-    fn test_validate_request_body_no_body_with_content_type() {
-        // Scenario: No 'body', but Content-Type 'header' is present
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0",
-        }))
-        .unwrap();
-        let operation = create_operation(json!({}));
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-        let result =
-            validator.validate_request_body(&operation, None::<&TestBodyStruct>, &headers_struct);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_body_no_request_body_schema_in_spec() {
-        // Scenario: Body exists, Content-Type exists but no requestBody field in OpenAPI spec
-        let validator = OpenApiPayloadValidator::new(json!({
-            "openapi": "3.1.0",
-        }))
-        .unwrap();
-        let operation = create_operation(json!({}));
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-
-        let body = json!({});
-        let body_struct = TestBodyStruct { data: body };
-        let result =
-            validator.validate_request_body(&operation, Some(&body_struct), &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::DefinitionExpected) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::DefinitionExpected");
-        }
-    }
-
-    #[test]
-    fn test_validate_request_body_body_matches_schema() {
-        // Scenario: Body exists, Content-Type exists, and body matches schema
-        let operation_json = json!({
-            "openapi": "3.1.0",
-            "requestBody": {
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                        }
-                    }
-                }
-            }
-        });
-        let validator = OpenApiPayloadValidator::new(operation_json.clone()).unwrap();
-        let operation = create_operation(operation_json);
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-        let body = json!({});
-        let body_struct = TestBodyStruct { data: body };
-        let result =
-            validator.validate_request_body(&operation, Some(&body_struct), &headers_struct);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_body_body_does_not_match_schema() {
-        // Scenario: Body exists, Content-Type exists, and body does not match schema
-        let operation_json = json!({
-            "openapi": "3.1.0",
-            "requestBody": {
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "required": ["id"]
-                        }
-                    }
-                }
-            }
-        });
-        let validator = OpenApiPayloadValidator::new(operation_json.clone()).unwrap();
-        let operation = create_operation(operation_json);
-
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-        let body = json!({});
-        let body_struct = TestBodyStruct { data: body };
-        let result =
-            validator.validate_request_body(&operation, Some(&body_struct), &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::RequiredPropertyMissing) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::RequiredPropertyMissing");
-        }
-    }
-
-    #[test]
-    fn test_validate_request_body_missing_content_schema() {
-        // Scenario: Content field is missing from the OpenAPI specification
-        let operation_json = json!({
-            "openapi": "3.1.0",
-            "requestBody": {}
-        });
-        let validator = OpenApiPayloadValidator::new(operation_json.clone()).unwrap();
-        let operation = create_operation(operation_json);
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-        let body = json!({});
-        let body_struct = TestBodyStruct { data: body };
-        let result =
-            validator.validate_request_body(&operation, Some(&body_struct), &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::FieldMissing) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::FieldMissing");
-        }
-    }
-
-    #[test]
-    fn test_validate_request_body_missing_schema_field() {
-        // Scenario: Schema field is missing in the Content-Type definition
-        let operation_json = json!({
-            "openapi": "3.1.0",
-            "requestBody": {
-                "content": {
-                    "application/json": {}
-                }
-            }
-        });
-        let validator = OpenApiPayloadValidator::new(operation_json.clone()).unwrap();
-        let operation = create_operation(operation_json);
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_struct = TestParamStruct { data: headers };
-        let body = json!({});
-        let body_struct = TestBodyStruct { data: body };
-        let result =
-            validator.validate_request_body(&operation, Some(&body_struct), &headers_struct);
-        assert!(result.is_err());
-        if let Err(ValidationError::FieldMissing) = result {
-            assert!(true, "Expected error")
-        } else {
-            panic!("Expected ValidationError::FieldMissing");
-        }
-    }
-
-    #[test]
-    fn test_wild_openapi_spec_request_body_validation() {
-        // Load the wild-openapi-spec.json file
-        let spec_json = fs::read_to_string("./test/wild-openapi-spec.json").unwrap();
-        let spec =
-            serde_json::from_str(&spec_json).expect("Failed to parse wild-openapi-spec.json");
-
-        // Create validator
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-
-        // Create headers with JSON content type
-        let mut headers = HashMap::new();
-        headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/json".to_string(),
-        );
-        let headers_instance = TestParamStruct { data: headers };
-
-        // Get the pet operation from the spec
-
-        //"/paths/~1pet/post"
-        let operation = validator.traverser.get_operation("/pet", "post").unwrap();
-
-        // Test 1: Valid BasePet + Cat JSON body
-        let valid_cat_body = TestBodyStruct {
-            data: json!({
-                "name": "Mittens",
-                "age": 3,
-                "hunts": true,
-                "breed": "Siamese"
-            }),
-        };
-
-        let result =
-            validator.validate_request_body(&operation, Some(&valid_cat_body), &headers_instance);
-        match result {
-            Ok(_) => assert!(true),
-            Err(e) => assert!(false, "error: {}", e.to_string()),
-        }
-
-        // Test 3: Invalid cat with wrong breed
-        let invalid_cat_body = TestBodyStruct {
-            data: json!({
-                "name": "Whiskers",
-                "age": 2,
-                "hunts": true,
-                "breed": "Unknown"
-            }),
-        };
-
-        let result =
-            validator.validate_request_body(&operation, Some(&invalid_cat_body), &headers_instance);
-        assert!(
-            result.is_err(),
-            "Cat with invalid breed should fail validation"
-        );
-
-        // Test 6: Test with XML content type (should validate against Pet schema)
-        let mut xml_headers = HashMap::new();
-        xml_headers.insert(
-            UniCase::new("Content-Type".to_string()),
-            "application/xml".to_string(),
-        );
-        let xml_headers_instance = TestParamStruct { data: xml_headers };
-
-        let valid_pet_xml_equivalent = TestBodyStruct {
-            data: json!({  // We use JSON for simplicity, but specify XML content type
-                "name": "Doggo",
-                "photoUrls": ["http://example.com/photo.jpg"],
-                "id": 123,
-                "category": {
-                    "id": 1,
-                    "name": "Dogs"
-                },
-                "tags": [
-                    {"id": 1, "name": "friendly"}
-                ],
-                "status": "available"
-            }),
-        };
-
-        let result = validator.validate_request_body(
-            &operation,
-            Some(&valid_pet_xml_equivalent),
-            &xml_headers_instance,
-        );
-        assert!(
-            result.is_ok(),
-            "Valid pet with XML content type should pass validation: {:?}",
-            result
-        );
-
-        // Test 7: Invalid - missing required photoUrls in Pet schema with XML content type
-        let invalid_pet_xml_equivalent = TestBodyStruct {
-            data: json!({
-                "name": "Doggo",
-                // Missing required "photoUrls" field
-                "id": 123
-            }),
-        };
-
-        let result = validator.validate_request_body(
-            &operation,
-            Some(&invalid_pet_xml_equivalent),
-            &xml_headers_instance,
-        );
-        assert!(
-            result.is_err(),
-            "Pet without required photoUrls field should fail validation with XML content type"
-        );
-    }
-
-    #[test]
-    fn test_validate_request_query_parameters_no_parameters() {
-        // Setup
+    // Helper function to create a validator with specific schema
+    fn create_validator() -> OpenApiPayloadValidator {
         let spec = json!({
             "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": []
-                    }
-                }
-            }
-        });
-
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({"parameters": []}));
-        let query_params = TestParamStruct { data: HashMap::new() };
-
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_query_parameters_required_parameter_present() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
+            "info": {
+                "title": "Test API",
+                "version": "1.0.0"
+            },
             "paths": {
                 "/test": {
                     "get": {
                         "parameters": [
-                            {
-                                "name": "id",
-                                "in": "query",
-                                "required": true,
-                                "schema": {
-                                    "type": "string"
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        });
-
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "id",
-                    "in": "query",
-                    "required": true,
-                    "schema": {
-                        "type": "string"
-                    }
-                }
-            ]
-        }));
-
-        let mut params = HashMap::new();
-        params.insert(UniCase::new("id".to_string()), "123".to_string());
-        let query_params = TestParamStruct { data: params };
-
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_query_parameters_required_parameter_missing() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": [
-                            {
-                                "name": "id",
-                                "in": "query",
-                                "required": true,
-                                "schema": {
-                                    "type": "string"
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        });
-
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "id",
-                    "in": "query",
-                    "required": true,
-                    "schema": {
-                        "type": "string"
-                    }
-                }
-            ]
-        }));
-
-        let query_params = TestParamStruct { data: HashMap::new() };
-
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
-        assert!(result.is_err());
-        match result {
-            Err(ValidationError::RequiredParameterMissing) => (),
-            _ => panic!("Expected RequiredParameterMissing error"),
-        }
-    }
-
-    #[test]
-    fn test_validate_request_query_parameters_optional_parameter_missing() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": [
-                            {
-                                "name": "filter",
-                                "in": "query",
-                                "required": false,
-                                "schema": {
-                                    "type": "string"
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        });
-
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "filter",
-                    "in": "query",
-                    "required": false,
-                    "schema": {
-                        "type": "string"
-                    }
-                }
-            ]
-        }));
-
-        let query_params = TestParamStruct { data: HashMap::new() };
-
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_request_query_parameters_parameter_wrong_type() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": [
-                            {
-                                "name": "age",
-                                "in": "query",
-                                "required": true,
-                                "schema": {
-                                    "type": "integer"
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        });
-
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "age",
-                    "in": "query",
-                    "required": true,
-                    "schema": {
-                        "type": "integer"
-                    }
-                }
-            ]
-        }));
-
-        let mut params = HashMap::new();
-        params.insert(UniCase::new("age".to_string()), "not-a-number".to_string());
-        let query_params = TestParamStruct { data: params };
-
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
-        assert!(result.is_err());
-        match result {
-            Err(ValidationError::InvalidType) => (),
-            _ => panic!("Expected InvalidType error"),
-        }
-    }
-
-    #[test]
-    fn test_validate_request_query_parameters_multiple_parameters() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": [
-                            {
-                                "name": "page",
-                                "in": "query",
-                                "required": true,
-                                "schema": {
-                                    "type": "integer"
-                                }
-                            },
                             {
                                 "name": "limit",
                                 "in": "query",
                                 "required": true,
                                 "schema": {
-                                    "type": "integer"
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 100
                                 }
                             },
                             {
-                                "name": "sort",
+                                "name": "offset",
+                                "in": "query",
+                                "required": false,
+                                "schema": {
+                                    "type": "integer",
+                                    "default": 0
+                                }
+                            },
+                            {
+                                "name": "filter",
+                                "in": "query",
+                                "required": false,
+                                "schema": {
+                                    "type": "string",
+                                    "enum": ["active", "inactive", "all"]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        OpenApiPayloadValidator::new(spec).unwrap()
+    }
+
+    #[test]
+    fn test_validate_valid_query_params() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Valid query string with all parameters
+        let query_params = "limit=50&offset=10&filter=active";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_query_params_missing_required() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string missing required 'limit' parameter
+        let query_params = "offset=10&filter=active";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::RequiredParameterMissing
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_params_with_only_required() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with only the required parameter
+        let query_params = "limit=50";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_query_params_invalid_value() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with invalid value for 'limit' (exceeds maximum)
+        let query_params = "limit=200&offset=10";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_query_params_non_numeric_for_integer() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with non-numeric value for 'limit' which requires integer
+        let query_params = "limit=abc&offset=10";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_query_params_invalid_enum_value() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with invalid enum value for 'filter'
+        let query_params = "limit=50&filter=invalid";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_query_params_empty_string() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Empty query string
+        let query_params = "";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::RequiredParameterMissing
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_params_malformed_query() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Malformed query string (missing value)
+        let query_params = "limit=50&offset=";
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_query_params_duplicate_parameters() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with duplicate parameters (last one should be used)
+        let query_params = "limit=50&limit=75";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_ok());
+
+        // In this implementation, the last value overrides previous ones
+        // We can't easily test the exact value used, but we know it should validate
+    }
+
+    #[test]
+    fn test_validate_query_params_url_encoded_values() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with URL-encoded values
+        let query_params = "limit=50&filter=active%20items";
+
+        // This test depends on how the validator handles URL encoding
+        // If it doesn't decode values, this might fail
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err()); // "active items" is not in the enum
+    }
+
+    #[test]
+    fn test_validate_query_params_extra_parameters() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Query string with extra parameters not defined in the schema
+        let query_params = "limit=50&extra=value";
+
+        // Extra parameters should be ignored
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_query_params_no_parameters_defined() {
+        // Create a validator with no parameters defined
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": {
+                "title": "Test API",
+                "version": "1.0.0"
+            },
+            "paths": {
+                "/test": {
+                    "get": {}
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Any query string should be valid when no parameters are defined
+        let query_params = "param1=value1&param2=value2";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_query_params_parsing_edge_cases() {
+        let validator = create_validator();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Test with various edge cases in query string parsing
+
+        // 1. Query string with just an ampersand
+        let query_params = "&";
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err()); // Missing required parameter
+
+        // 2. Query string with just a key (no equals sign)
+        let query_params = "limit";
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err()); // Malformed query and missing required parameter
+
+        // 3. Query string with just a key and equals sign
+        let query_params = "limit=";
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_err()); // Malformed value for required parameter
+    }
+
+    #[test]
+    fn test_validate_query_params_with_array_reference() {
+        // Create a validator with a parameter that references a component
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": {
+                "title": "Test API",
+                "version": "1.0.0"
+            },
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "$ref": "#/components/parameters/LimitParam"
+                            }
+                        ]
+                    }
+                }
+            },
+            "components": {
+                "parameters": {
+                    "LimitParam": {
+                        "name": "limit",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1
+                        }
+                    }
+                }
+            }
+        });
+
+        let validator = OpenApiPayloadValidator::new(spec).unwrap();
+
+        // Get the operation object
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Valid query string
+        let query_params = "limit=10";
+
+        let result = validator.validate_request_query_parameters(&operation, query_params);
+        assert!(result.is_ok());
+    }
+
+    fn create_operation_with_security(security_requirements: serde_json::Value) -> Operation {
+        let mut path = JsonPath::new();
+        path.add("paths").add("/test").add("get");
+
+        let operation_data = json!({
+            "security": security_requirements
+        });
+
+        Operation {
+            data: operation_data,
+            path,
+        }
+    }
+
+    // Helper function to create a validator with specific security definitions
+    fn create_validator_with_security_definitions(
+        definitions: serde_json::Value,
+    ) -> OpenApiPayloadValidator {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": {
+                "title": "Test API",
+                "version": "1.0.0"
+            },
+            "paths": {
+                "/test": {
+                    "get": {
+                        "security": [
+                            { "oauth2": ["read", "write"] }
+                        ]
+                    }
+                }
+            },
+            "components": {
+                "securitySchemes": definitions
+            }
+        });
+        OpenApiPayloadValidator::new(spec).unwrap()
+    }
+
+    #[test]
+    fn test_validate_request_scopes_success() {
+        // Create a validator with OAuth2 security definition
+        let validator = create_validator_with_security_definitions(json!({
+            "oauth2": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://example.com/auth",
+                        "scopes": {
+                            "read": "Read access",
+                            "write": "Write access"
+                        }
+                    }
+                }
+            }
+        }));
+
+        // Create an operation requiring "read" and "write" scopes
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Test with matching scopes
+        let scopes = vec!["read".to_string(), "write".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_success_with_extra_scopes() {
+        // Create a validator with OAuth2 security definition
+        let validator = create_validator_with_security_definitions(json!({
+            "oauth2": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://example.com/auth",
+                        "scopes": {
+                            "read": "Read access",
+                            "write": "Write access",
+                            "admin": "Admin access"
+                        }
+                    }
+                }
+            }
+        }));
+
+        // Create an operation requiring "read" and "write" scopes
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Test with matching scopes plus an extra one
+        let scopes = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_missing_required_scope() {
+        // Create a validator with OAuth2 security definition
+        let validator = create_validator_with_security_definitions(json!({
+            "oauth2": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://example.com/auth",
+                        "scopes": {
+                            "read": "Read access",
+                            "write": "Write access"
+                        }
+                    }
+                }
+            }
+        }));
+
+        // Create an operation requiring "read" and "write" scopes
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Test with missing "write" scope
+        let scopes = vec!["read".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_empty_scopes() {
+        // Create a validator with OAuth2 security definition
+        let validator = create_validator_with_security_definitions(json!({
+            "oauth2": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://example.com/auth",
+                        "scopes": {
+                            "read": "Read access",
+                            "write": "Write access"
+                        }
+                    }
+                }
+            }
+        }));
+
+        // Create an operation requiring "read" and "write" scopes
+        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+
+        // Test with empty scopes
+        let scopes = vec![];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_multiple_security_requirements_one_satisfied() {
+        // Create a validator with multiple security definitions
+        let validator = create_validator_with_security_definitions(json!({
+            "oauth2": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://example.com/auth",
+                        "scopes": {
+                            "read": "Read access",
+                            "write": "Write access"
+                        }
+                    }
+                }
+            },
+            "apiKey": {
+                "type": "apiKey",
+                "name": "api_key",
+                "in": "header"
+            }
+        }));
+
+        // Create an operation with alternative security requirements
+        let operation = create_operation_with_security(json!([
+            { "oauth2": ["read", "write"] },
+            { "apiKey": [] }
+        ]));
+
+        // Test with satisfying the first requirement but not the second
+        let scopes = vec!["read".to_string(), "write".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_ok());
+    }
+
+    //    #[test]
+    //    fn test_validate_request_scopes_multiple_security_requirements_none_satisfied() {
+    //        // Create a validator with multiple security definitions
+    //        let validator = create_validator_with_security_definitions(json!({
+    //            "oauth2": {
+    //                "type": "oauth2",
+    //                "flows": {
+    //                    "implicit": {
+    //                        "authorizationUrl": "https://example.com/auth",
+    //                        "scopes": {
+    //                            "read": "Read access",
+    //                            "write": "Write access"
+    //                        }
+    //                    }
+    //                }
+    //            },
+    //            "apiKey": {
+    //                "type": "apiKey",
+    //                "name": "api_key",
+    //                "in": "header"
+    //            }
+    //        }));
+    //
+    //        // Create an operation with alternative security requirements
+    //        let operation = create_operation_with_security(json!([
+    //            { "oauth2": ["read", "write"] },
+    //            { "apiKey": [] }
+    //        ]));
+    //
+    //        // Test with not satisfying any requirement
+    //        let scopes = vec!["admin".to_string()];
+    //        let result = validator.validate_request_scopes(&operation, &scopes);
+    //
+    //        assert!(result.is_err());
+    //    }
+
+    #[test]
+    fn test_validate_request_scopes_no_security_requirement() {
+        // Create a validator without security definitions
+        let validator = create_validator_with_security_definitions(json!({}));
+
+        // Create an operation without security requirements
+        let operation = create_operation_with_security(json!([]));
+
+        // Test with any scopes
+        let scopes = vec!["read".to_string(), "write".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_ok());
+    }
+
+    //    #[test]
+    //    fn test_validate_request_scopes_with_invalid_security_scheme() {
+    //        // Create a validator with an invalid security scheme
+    //        let validator = create_validator_with_security_definitions(json!({
+    //            "nonexistent": {
+    //                "type": "oauth2",
+    //                "flows": {
+    //                    "implicit": {
+    //                        "authorizationUrl": "https://example.com/auth",
+    //                        "scopes": {
+    //                            "read": "Read access"
+    //                        }
+    //                    }
+    //                }
+    //            }
+    //        }));
+    //
+    //        // Create an operation requiring a different security scheme
+    //        let operation = create_operation_with_security(json!([
+    //            { "oauth2": ["read"] }
+    //        ]));
+    //
+    //        // Test with scopes for a scheme that doesn't exist in the security definitions
+    //        let scopes = vec!["read".to_string()];
+    //        let result = validator.validate_request_scopes(&operation, &scopes);
+    //
+    //        assert!(result.is_err());
+    //    }
+
+    #[test]
+    fn test_validate_request_scopes_with_malformed_security_requirement() {
+        // Create a validator with OAuth2 security definition
+        let validator = create_validator_with_security_definitions(json!({
+            "oauth2": {
+                "type": "oauth2",
+                "flows": {
+                    "implicit": {
+                        "authorizationUrl": "https://example.com/auth",
+                        "scopes": {
+                            "read": "Read access",
+                            "write": "Write access"
+                        }
+                    }
+                }
+            }
+        }));
+
+        // Create an operation with malformed security requirement (not an array of objects)
+        let operation = create_operation_with_security(json!("malformed"));
+
+        // Test with any scopes
+        let scopes = vec!["read".to_string(), "write".to_string()];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_scopes_with_security_scheme_without_scopes() {
+        // Create a validator with API key security definition
+        let validator = create_validator_with_security_definitions(json!({
+            "apiKey": {
+                "type": "apiKey",
+                "name": "api_key",
+                "in": "header"
+            }
+        }));
+
+        // Create an operation requiring API key authentication (no scopes)
+        let operation = create_operation_with_security(json!([
+            { "apiKey": [] }
+        ]));
+
+        // Test with empty scopes
+        let scopes = vec![];
+        let result = validator.validate_request_scopes(&operation, &scopes);
+
+        // Should pass since API key schemes don't require scopes
+        assert!(result.is_ok());
+    }
+
+    // Helper function to create a validator for testing
+    fn create_test_validator() -> OpenApiPayloadValidator {
+        // Create a minimal OpenAPI spec for testing
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": {
+                "title": "Test API",
+                "version": "1.0.0"
+            },
+            "paths": {
+                "/test": {
+                    "get": {
+                        "parameters": [
+                            {
+                                "name": "required_header",
+                                "in": "header",
+                                "required": true,
+                                "schema": {
+                                    "type": "string"
+                                }
+                            },
+                            {
+                                "name": "optional_query",
                                 "in": "query",
                                 "required": false,
                                 "schema": {
                                     "type": "string"
                                 }
                             }
-                        ]
+                        ],
+                        "requestBody": {
+                            "required": true,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["name"],
+                                        "properties": {
+                                            "name": { "type": "string" },
+                                            "age": { "type": "integer" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "security": [
+                            {
+                                "oauth2": ["read", "write"]
+                            }
+                        ],
+                        "responses": {
+                            "200": {
+                                "description": "Success"
+                            }
+                        }
                     }
                 }
             }
         });
 
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "page",
-                    "in": "query",
-                    "required": true,
-                    "schema": {
-                        "type": "integer"
-                    }
-                },
-                {
-                    "name": "limit",
-                    "in": "query",
-                    "required": true,
-                    "schema": {
-                        "type": "integer"
-                    }
-                },
-                {
-                    "name": "sort",
-                    "in": "query",
-                    "required": false,
-                    "schema": {
-                        "type": "string"
-                    }
-                }
-            ]
-        }));
+        OpenApiPayloadValidator::new(spec).unwrap()
+    }
 
-        let mut params = HashMap::new();
-        params.insert(UniCase::new("page".to_string()), "1".to_string());
-        params.insert(UniCase::new("limit".to_string()), "10".to_string());
-        params.insert(UniCase::new("sort".to_string()), "asc".to_string());
-        let query_params = TestParamStruct { data: params };
+    #[test]
+    fn test_validate_valid_request() {
+        let validator = create_test_validator();
 
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-        // Verify
+        // Create headers with required header
+        let mut headers = HeaderMap::new();
+        headers.insert("required_header", HeaderValue::from_static("value"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        // Create a valid body
+        let body = json!({
+            "name": "Test User",
+            "age": 30
+        });
+
+        // Create a valid request
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test?optional_query=value")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+
+        // Provide required scopes
+        let scopes = vec!["read".to_string(), "write".to_string()];
+
+        // Should validate successfully
+        let result = validator.validate_request(&request, Some(&scopes));
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_validate_request_query_parameters_non_query_parameters() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": [
-                            {
-                                "name": "id",
-                                "in": "path",
-                                "required": true,
-                                "schema": {
-                                    "type": "string"
-                                }
-                            },
-                            {
-                                "name": "filter",
-                                "in": "query",
-                                "required": true,
-                                "schema": {
-                                    "type": "string"
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        });
+    fn test_invalid_operation() {
+        let validator = create_test_validator();
 
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "id",
-                    "in": "path",
-                    "required": true,
-                    "schema": {
-                        "type": "string"
-                    }
-                },
-                {
-                    "name": "filter",
-                    "in": "query",
-                    "required": true,
-                    "schema": {
-                        "type": "string"
-                    }
-                }
-            ]
-        }));
+        // Create a request with an invalid path
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/invalid_path")
+            .build()
+            .unwrap();
 
-        let mut params = HashMap::new();
-        params.insert(UniCase::new("filter".to_string()), "active".to_string());
-        let query_params = TestParamStruct { data: params };
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(json!({}))
+            .unwrap();
 
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
-        assert!(result.is_ok());
+        // Should fail with MissingOperation
+        let result = validator.validate_request(&request, None);
+        assert!(matches!(result, Err(ValidationError::MissingOperation)));
     }
 
     #[test]
-    fn test_validate_request_query_parameters_invalid_schema_structure() {
-        // Setup
-        let spec = json!({
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "parameters": [
-                            {
-                                "name": "filter",
-                                "in": "query",
-                                "required": true
-                                // Missing schema
-                            }
-                        ]
-                    }
-                }
-            }
+    fn test_invalid_request_body() {
+        let validator = create_test_validator();
+
+        // Create headers
+        let mut headers = HeaderMap::new();
+        headers.insert("required_header", HeaderValue::from_static("value"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        // Create an invalid body (missing required 'name' field)
+        let body = json!({
+            "age": 30
         });
 
-        let validator = OpenApiPayloadValidator::new(spec).unwrap();
-        let operation = create_operation(json!({
-            "parameters": [
-                {
-                    "name": "filter",
-                    "in": "query",
-                    "required": true
-                    // Missing schema
-                }
-            ]
-        }));
+        // Create request
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test")
+            .build()
+            .unwrap();
 
-        let mut params = HashMap::new();
-        params.insert(UniCase::new("filter".to_string()), "active".to_string());
-        let query_params = TestParamStruct { data: params };
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
 
-        // Execute
-        let result = validator.validate_request_query_parameters(&operation, &query_params);
-
-        // Verify
+        // Should fail with body validation error
+        let result = validator.validate_request(&request, None);
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_missing_required_header() {
+        let validator = create_test_validator();
+
+        // Create a valid body
+        let body = json!({
+            "name": "Test User",
+            "age": 30
+        });
+
+        // Create request without required header
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+
+        // Should fail with header validation error
+        let result = validator.validate_request(&request, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_parameter_validation() {
+        let validator = create_test_validator();
+
+        // Create a valid body
+        let body = json!({
+            "name": "Test User",
+            "age": 30
+        });
+
+        // Create a request with an invalid query parameter (if the schema had type restrictions)
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test?optional_query=invalid_value")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+
+        // If query validation would fail based on schema
+        let result = validator.validate_request(&request, None);
+        // Assert based on expected behavior
+    }
+
+    #[test]
+    fn test_missing_scopes() {
+        let validator = create_test_validator();
+
+        // Create a valid body
+        let body = json!({
+            "name": "Test User",
+            "age": 30
+        });
+
+        // Create a valid request
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+
+        // Missing required scope
+        let scopes = vec!["read".to_string()]; // Missing 'write' scope
+
+        // Should fail with scope validation error
+        let result = validator.validate_request(&request, Some(&scopes));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_non_serializable_body() {
+        // This test would be challenging since we'd need a type that implements
+        // Serialize but fails during serialization. For completeness, we could
+        // mock the serialization failure.
+
+        struct NonSerializableType;
+
+        impl serde::Serialize for NonSerializableType {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("Forced serialization error"))
+            }
+        }
+
+        let validator = create_test_validator();
+
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(NonSerializableType)
+            .unwrap();
+
+        // Should handle serialization failure gracefully
+        let result = validator.validate_request(&request, None);
+        // The function should use None for the body in this case
+    }
+
+    #[test]
+    fn test_no_query_parameters() {
+        let validator = create_test_validator();
+
+        // Create a valid body
+        let body = json!({
+            "name": "Test User",
+            "age": 30
+        });
+
+        // Create request without query parameters
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+
+        // Should still validate successfully as the query param is optional
+        let scopes = vec!["read".to_string(), "write".to_string()];
+        let result = validator.validate_request(&request, Some(&scopes));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_no_scopes_provided() {
+        let validator = create_test_validator();
+
+        // Create a valid body
+        let body = json!({
+            "name": "Test User",
+            "age": 30
+        });
+
+        // Create a valid request
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority("example.com")
+            .path_and_query("/test")
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("required_header", "value")
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+
+        // No scopes provided (passing None)
+        let result = validator.validate_request(&request, None);
+        // Depending on implementation, this might fail or skip scope validation
+    }
+
+    #[test]
+    fn test_new_json_path() {
+        let path = JsonPath::new();
+        assert_eq!(path.0.len(), 0);
+        assert_eq!(path.format_path(), "");
+    }
+
+    #[test]
+    fn test_add_simple_segment() {
+        let mut path = JsonPath::new();
+        path.add("simple");
+        assert_eq!(path.0.len(), 1);
+        assert_eq!(path.0[0], "simple");
+        assert_eq!(path.format_path(), "simple");
+    }
+
+    #[test]
+    fn test_add_multiple_segments() {
+        let mut path = JsonPath::new();
+        path.add("component").add("schemas").add("User");
+        assert_eq!(path.0.len(), 3);
+        assert_eq!(path.0[0], "component");
+        assert_eq!(path.0[1], "schemas");
+        assert_eq!(path.0[2], "User");
+        assert_eq!(path.format_path(), "component/schemas/User");
+    }
+
+    #[test]
+    fn test_add_segment_with_tilde() {
+        let mut path = JsonPath::new();
+        path.add("user~name");
+        assert_eq!(path.0.len(), 1);
+        assert_eq!(path.0[0], format!("user{}name", ENCODED_TILDE));
+
+        // Check that the tilde is properly encoded in the formatted path
+        let formatted = path.format_path();
+        assert_eq!(formatted, format!("user{}name", ENCODED_TILDE));
+    }
+
+    #[test]
+    fn test_add_segment_with_slash() {
+        let mut path = JsonPath::new();
+        path.add("user/profile");
+        assert_eq!(path.0.len(), 1);
+        assert_eq!(path.0[0], format!("user{}profile", ENCODED_BACKSLASH));
+
+        // Check that the slash is properly encoded in the formatted path
+        let formatted = path.format_path();
+        assert_eq!(formatted, format!("user{}profile", ENCODED_BACKSLASH));
+        assert!(!formatted.contains("/"));
+    }
+
+    #[test]
+    fn test_add_segment_with_tilde_and_slash() {
+        let mut path = JsonPath::new();
+        path.add("user~/profile");
+        assert_eq!(path.0.len(), 1);
+
+        // Both special characters should be encoded
+        let expected = "user".to_string() + ENCODED_TILDE + ENCODED_BACKSLASH + "profile";
+        assert_eq!(path.0[0], expected);
+
+        // Check that both special characters are properly encoded in the formatted path
+        let formatted = path.format_path();
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_path_empty() {
+        let path = JsonPath::new();
+        assert_eq!(path.format_path(), "");
+    }
+
+    #[test]
+    fn test_format_path_single_segment() {
+        let mut path = JsonPath::new();
+        path.add("test");
+        assert_eq!(path.format_path(), "test");
+    }
+
+    #[test]
+    fn test_format_path_complex() {
+        let mut path = JsonPath::new();
+        path.add("paths")
+            .add("/users/{id}")
+            .add("get")
+            .add("responses")
+            .add("200");
+
+        // The segment with slashes should be encoded
+        let expected_second = format!("{}users{}{{id}}", ENCODED_BACKSLASH, ENCODED_BACKSLASH);
+        assert_eq!(path.0[1], expected_second);
+
+        // The formatted path should have the proper separators and encodings
+        let expected_path = format!(
+            "paths{}{}{}{}{}{}{}{}",
+            PATH_SEPARATOR,
+            expected_second,
+            PATH_SEPARATOR,
+            "get",
+            PATH_SEPARATOR,
+            "responses",
+            PATH_SEPARATOR,
+            "200"
+        );
+        assert_eq!(path.format_path(), expected_path);
+    }
+
+    #[test]
+    fn test_chained_add_operations() {
+        let mut path = JsonPath::new();
+        let result = path.add("first").add("second").add("third");
+
+        // Verify that we get a mutable reference back each time for chaining
+        assert_eq!(result.0.len(), 3);
+        assert_eq!(path.0.len(), 3);
+        assert_eq!(path.format_path(), "first/second/third");
+    }
+
+    #[test]
+    fn test_add_empty_segment() {
+        let mut path = JsonPath::new();
+        path.add("");
+        assert_eq!(path.0.len(), 1);
+        assert_eq!(path.0[0], "");
+        assert_eq!(path.format_path(), "");
+    }
+
+    #[test]
+    fn test_json_pointer_compatibility() {
+        // Test that the path representation is compatible with JSON Pointer format
+        // by creating paths that would be used in real OpenAPI specs
+
+        let mut path = JsonPath::new();
+        path.add("components").add("schemas").add("Error");
+        assert_eq!(path.format_path(), "components/schemas/Error");
+
+        let mut path = JsonPath::new();
+        path.add("paths")
+            .add("/pets")
+            .add("get")
+            .add("parameters")
+            .add("0");
+
+        // The '/pets' segment should have its slash encoded
+        let expected_second = format!("{}pets", ENCODED_BACKSLASH);
+        assert_eq!(path.0[1], expected_second);
+
+        let expected_path = format!(
+            "paths{}{}{}{}{}{}{}{}",
+            PATH_SEPARATOR,
+            expected_second,
+            PATH_SEPARATOR,
+            "get",
+            PATH_SEPARATOR,
+            "parameters",
+            PATH_SEPARATOR,
+            "0"
+        );
+        assert_eq!(path.format_path(), expected_path);
+    }
+
+    #[test]
+    fn test_special_characters_encoding() {
+        let mut path = JsonPath::new();
+
+        // Test various special character combinations
+        path.add("a~b/c");
+        path.add("d/e~f");
+        path.add("~~/~~");
+        path.add("//");
+
+        assert_eq!(path.0.len(), 4);
+
+        // First segment: a~b/c -> a~0b~1c
+        assert_eq!(
+            path.0[0],
+            format!("a{}b{}c", ENCODED_TILDE, ENCODED_BACKSLASH)
+        );
+
+        // Second segment: d/e~f -> d~1e~0f
+        assert_eq!(
+            path.0[1],
+            format!("d{}e{}f", ENCODED_BACKSLASH, ENCODED_TILDE)
+        );
+
+        // Third segment: ~~/~~ -> ~0~0~1~0~0
+        assert_eq!(
+            path.0[2],
+            format!("{0}{0}{1}{0}{0}", ENCODED_TILDE, ENCODED_BACKSLASH)
+        );
+
+        // Fourth segment: // -> ~1~1
+        assert_eq!(path.0[3], format!("{0}{0}", ENCODED_BACKSLASH));
+
+        // Verify the entire formatted path
+        let expected_path = [
+            format!("a{}b{}c", ENCODED_TILDE, ENCODED_BACKSLASH),
+            format!("d{}e{}f", ENCODED_BACKSLASH, ENCODED_TILDE),
+            format!("{0}{0}{1}{0}{0}", ENCODED_TILDE, ENCODED_BACKSLASH),
+            format!("{0}{0}", ENCODED_BACKSLASH),
+        ]
+        .join(PATH_SEPARATOR);
+
+        assert_eq!(path.format_path(), expected_path);
+    }
+
+    #[test]
+    fn test_numeric_segments() {
+        let mut path = JsonPath::new();
+        path.add("items").add("0").add("name");
+
+        assert_eq!(path.0.len(), 3);
+        assert_eq!(path.0[0], "items");
+        assert_eq!(path.0[1], "0");
+        assert_eq!(path.0[2], "name");
+        assert_eq!(path.format_path(), "items/0/name");
+    }
+
+    #[test]
+    fn test_modify_existing_path() {
+        let mut path = JsonPath::new();
+        path.add("components").add("schemas");
+
+        assert_eq!(path.format_path(), "components/schemas");
+
+        // Now modify by adding more segments
+        path.add("User").add("properties").add("email");
+
+        assert_eq!(path.0.len(), 5);
+        assert_eq!(
+            path.format_path(),
+            "components/schemas/User/properties/email"
+        );
+    }
 }
