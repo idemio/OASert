@@ -1,5 +1,5 @@
 use crate::traverser::OpenApiTraverser;
-use crate::types::{OpenApiTypes, OpenApiVersion, Operation, ParameterLocation};
+use crate::types::{HttpLike, OpenApiTypes, OpenApiVersion, Operation, ParameterLocation};
 use crate::{
     CONTENT_FIELD, ENCODED_BACKSLASH, ENCODED_TILDE, IN_FIELD, NAME_FIELD, OPENAPI_FIELD,
     PARAMETERS_FIELD, PATH_SEPARATOR, REF_FIELD, REQUEST_BODY_FIELD, REQUIRED_FIELD, SCHEMA_FIELD,
@@ -107,7 +107,7 @@ impl OpenApiPayloadValidator {
 
     pub fn validate_request<T>(
         &self,
-        request: &Request<T>,
+        request: &impl HttpLike<T>,
         scopes: Option<&Vec<String>>,
     ) -> Result<(), ValidationError>
     where
@@ -115,7 +115,7 @@ impl OpenApiPayloadValidator {
     {
         let operation = self
             .traverser
-            .get_operation(request.uri().path(), request.method().as_str())?;
+            .get_operation(request.path(), request.method().as_str())?;
 
         let content_type = Self::extract_content_type(&request.headers());
         match serde_json::to_value(request.body()) {
@@ -130,7 +130,7 @@ impl OpenApiPayloadValidator {
         }?;
         self.validate_request_header_params(&operation, request.headers())?;
 
-        if let Some(query_params) = request.uri().query() {
+        if let Some(query_params) = request.query() {
             self.validate_request_query_parameters(&operation, query_params)?;
         }
 

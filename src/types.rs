@@ -1,4 +1,5 @@
 use crate::validator::{JsonPath, ValidationError};
+use http::{HeaderMap, Method};
 use jsonschema::Draft;
 use serde_json::{json, Value};
 use std::fmt::{Display, Formatter};
@@ -124,6 +125,45 @@ impl OpenApiVersion {
         match self {
             OpenApiVersion::V30x => Draft::Draft4,
             OpenApiVersion::V31x => Draft::Draft202012,
+        }
+    }
+}
+
+pub trait HttpLike<T>
+where
+    T: serde::ser::Serialize,
+{
+    fn method(&self) -> &Method;
+    fn path(&self) -> &str;
+    fn headers(&self) -> &HeaderMap;
+    fn body(&self) -> &T;
+    fn query(&self) -> Option<&str>;
+}
+
+impl<T> HttpLike<T> for http::Request<T>
+where
+    T: serde::ser::Serialize,
+{
+    fn method(&self) -> &Method {
+        &self.method()
+    }
+
+    fn path(&self) -> &str {
+        &self.uri().path()
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        &self.headers()
+    }
+
+    fn body(&self) -> &T {
+        &self.body()
+    }
+
+    fn query(&self) -> Option<&str> {
+        match &self.uri().query() {
+            None => None,
+            Some(x) => Some(x),
         }
     }
 }
