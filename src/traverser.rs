@@ -1,12 +1,16 @@
+use crate::error::{
+    ComponentSection, OperationSection, Section, SpecificationSection, ValidationErrorType,
+};
+use crate::types::json_path::JsonPath;
+use crate::types::primitive::OpenApiPrimitives;
 use crate::types::Operation;
-use crate::validator::{JsonPath, ValidationError, ValidationErrorKind};
 use crate::{PATHS_FIELD, PATH_SEPARATOR, REF_FIELD};
 use dashmap::{DashMap, Entry};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-type TraverseResult<'a> = Result<SearchResult<'a>, ValidationError>;
+type TraverseResult<'a> = Result<SearchResult<'a>, ValidationErrorType>;
 
 #[derive(Debug)]
 pub(crate) enum SearchResult<'a> {
@@ -46,25 +50,20 @@ impl OpenApiTraverser {
         &self,
         request_path: &str,
         request_method: &str,
-    ) -> Result<Arc<Operation>, ValidationError> {
+    ) -> Result<Arc<Operation>, ValidationErrorType> {
         let binding = request_method.to_lowercase();
         let request_method = binding.as_str();
-        println!(
-            "Looking for path: {} and method {}",
-            request_path, request_method
-        );
         log::debug!("Looking for path '{request_path}' and method '{request_method}'");
 
         let entry = self
             .resolved_operations
             .entry((String::from(request_path), String::from(request_method)));
+
         match entry {
             Entry::Occupied(e) => Ok(e.get().clone()),
             Entry::Vacant(e) => {
                 // Grab all paths from the spec
-                if let Ok(spec_paths) =
-                    self.get_required_spec_node(&self.specification, PATHS_FIELD)
-                {
+                if let Ok(spec_paths) = self.get_required(&self.specification, PATHS_FIELD) {
                     let spec_paths = Self::require_object(spec_paths.value())?;
                     for (spec_path, spec_path_methods) in spec_paths {
                         let operations = Self::require_object(spec_path_methods)?;
@@ -90,12 +89,16 @@ impl OpenApiTraverser {
                                 if !Self::path_has_parameter(spec_path) {
                                     e.insert(operation.clone());
                                 }
+
                                 return Ok(operation);
                             }
                         }
                     }
                 }
-                Err(ValidationError::MissingOperation)
+                Err(ValidationErrorType::FieldExpected(
+                    format!("{}@{}", request_path, request_method),
+                    Section::Specification(SpecificationSection::Paths(OperationSection::Other)),
+                ))
             }
         }
     }
@@ -174,23 +177,20 @@ impl OpenApiTraverser {
     ///   to the field value, either as an owned `Arc<Value>` or a borrowed reference
     /// * `Ok(None)` - If the specified field doesn't exist in the value
     /// * `Err(ValidationError)` - For any error other than a missing field
-    pub(crate) fn get_optional_spec_node<'a>(
+    pub(crate) fn get_optional<'a>(
         &'a self,
         node: &'a Value,
         field: &str,
-    ) -> Result<Option<SearchResult<'a>>, ValidationError>
+    ) -> Result<Option<SearchResult<'a>>, ValidationErrorType>
     where
         Self: 'a,
     {
-        log::trace!(
-            "Attempting to find optional field '{}' from '{}'",
-            field,
-            node.to_string()
-        );
-        match self.get_required_spec_node(node, field) {
+        match self.get_required(node, field) {
             Ok(security) => Ok(Some(security)),
-            Err(e) if e.kind() == ValidationErrorKind::MismatchingSchema => Ok(None),
-            Err(e) => Err(e),
+            Err(e) => match e {
+                ValidationErrorType::FieldExpected(_, _) => Ok(None),
+                _ => Err(e),
+            },
         }
     }
 
@@ -204,11 +204,11 @@ impl OpenApiTraverser {
     /// * `Ok(SearchResult)` - A wrapped reference to the requested field value, either as an owned `Arc<Value>`
     ///   or a borrowed reference
     /// * `Err(ValidationError::FieldMissing)` - If the specified field doesn't exist in the value
-    pub(crate) fn get_required_spec_node<'a>(
+    pub(crate) fn get_required<'a>(
         &'a self,
         node: &'a Value,
         field: &str,
-    ) -> Result<SearchResult<'a>, ValidationError> {
+    ) -> Result<SearchResult<'a>, ValidationErrorType> {
         log::trace!(
             "Attempting to find required field '{}' from '{}'",
             field,
@@ -217,11 +217,21 @@ impl OpenApiTraverser {
         let ref_result = self.resolve_possible_ref(node)?;
         match ref_result {
             SearchResult::Arc(val) => match val.get(field) {
-                None => Err(ValidationError::FieldMissing),
+                None => Err(ValidationErrorType::FieldExpected(
+                    field.to_string(),
+                    Section::Specification(SpecificationSection::Components(
+                        ComponentSection::Schemas,
+                    )),
+                )),
                 Some(v) => Ok(SearchResult::Arc(Arc::new(v.clone()))),
             },
             SearchResult::Ref(val) => match val.get(field) {
-                None => Err(ValidationError::FieldMissing),
+                None => Err(ValidationErrorType::FieldExpected(
+                    field.to_string(),
+                    Section::Specification(SpecificationSection::Components(
+                        ComponentSection::Schemas,
+                    )),
+                )),
                 Some(v) => Ok(SearchResult::Ref(v)),
             },
         }
@@ -239,15 +249,10 @@ impl OpenApiTraverser {
     /// * `Err(ValidationError)` - If `reference` resolution fails (e.g., circular `reference` or missing field)
     fn resolve_possible_ref<'a>(&'a self, node: &'a Value) -> TraverseResult<'a> {
         if let Ok(ref_string) = Self::get_as_str(node, REF_FIELD) {
-            println!("Checking for: {}", ref_string);
             let entry = self.resolved_references.entry(String::from(ref_string));
             return match entry {
-                Entry::Occupied(entry) => {
-                    println!("Found: {}", ref_string);
-                    Ok(SearchResult::Arc(entry.get().clone()))
-                }
+                Entry::Occupied(entry) => Ok(SearchResult::Arc(entry.get().clone())),
                 Entry::Vacant(entry) => {
-                    println!("Ref string {} not found, solving", ref_string);
                     let mut seen_references = HashSet::new();
                     let res = self.get_reference_path(ref_string, &mut seen_references)?;
                     let res = match res {
@@ -262,12 +267,10 @@ impl OpenApiTraverser {
                             res
                         }
                     };
-                    println!("Resolved {} with value of {}", ref_string, res);
                     return Ok(SearchResult::Arc(res));
                 }
             };
         }
-
         Ok(SearchResult::Ref(node))
     }
 
@@ -290,7 +293,10 @@ impl OpenApiTraverser {
         'a: 'b,
     {
         if seen_references.contains(ref_string) {
-            return Err(ValidationError::CircularReference);
+            return Err(ValidationErrorType::CircularReference(
+                ref_string.to_string(),
+                Section::Specification(SpecificationSection::Components(ComponentSection::Schemas)),
+            ));
         }
         seen_references.insert(ref_string);
         let mut complete_path = String::from("/");
@@ -303,36 +309,27 @@ impl OpenApiTraverser {
 
         let current_schema = match &self.specification.pointer(&complete_path) {
             None => {
-                println!(
-                    "Could not find pointer path: {}, {}",
-                    path, &self.specification
-                );
-                return Err(ValidationError::FieldMissing);
+                return Err(ValidationErrorType::FieldExpected(
+                    complete_path,
+                    Section::Specification(SpecificationSection::Components(
+                        ComponentSection::Schemas,
+                    )),
+                ));
             }
             Some(v) => self.resolve_possible_ref(v)?,
         };
         Ok(current_schema)
     }
 
-    /// Retrieves the value of a specified field from a `Value` and attempts to return it as a string.
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - A reference to a `Value` object representing the data structure to be queried.
-    /// * `field` - A string slice representing the key (field name) to retrieve from the `node`.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(&str)` - If the field exists in the `node` and its value can successfully be interpreted as a string.
-    /// * `Err(ValidationError::FieldMissing)` - If the specified field does not exist in the `node`.
-    /// * `Err(ValidationError::UnexpectedType)` - If the field exists but its value is not a string.
-    fn get_as_str<'a, 'b>(node: &'a Value, field: &str) -> Result<&'b str, ValidationError>
+    fn get_as_str<'a, 'b>(node: &'a Value, field: &str) -> Result<&'b str, ValidationErrorType>
     where
         'a: 'b,
     {
-        log::trace!("Grabbing {} from {} as a str.", field, node.to_string());
         match node.get(field) {
-            None => Err(ValidationError::FieldMissing),
+            None => Err(ValidationErrorType::FieldExpected(
+                field.to_string(),
+                Section::Specification(SpecificationSection::Components(ComponentSection::Schemas)),
+            )),
             Some(found) => Self::require_str(found),
         }
     }
@@ -341,19 +338,24 @@ impl OpenApiTraverser {
     ///
     /// # Arguments
     ///
-    /// * `node` - A reference to a `Value` (from `serde_json`) representing a JSON structure.
-    ///   It is expected to be a valid JSON value of type boolean.
+    /// * `node` - A reference to a JSON `Value` from which the function will attempt to extract a `boolean`.
     ///
     /// # Returns
     ///
     /// * `Ok(bool)` - If the `Value` provided is a boolean
     /// * `Err(ValidationError::UnexpectedType)` - If the `Value` provided is not a boolean
-    pub(crate) fn require_bool<'a, 'b>(node: &'a Value) -> Result<bool, ValidationError>
+    pub(crate) fn require_bool<'a, 'b>(node: &'a Value) -> Result<bool, ValidationErrorType>
     where
         'a: 'b,
     {
         match node.as_bool() {
-            None => Err(ValidationError::UnexpectedType),
+            None => Err(ValidationErrorType::UnexpectedType {
+                expected: OpenApiPrimitives::Bool,
+                found: node.clone(),
+                section: Section::Specification(SpecificationSection::Components(
+                    ComponentSection::Schemas,
+                )),
+            }),
             Some(bool) => Ok(bool),
         }
     }
@@ -366,12 +368,18 @@ impl OpenApiTraverser {
     /// # Returns
     /// * `Ok(&str)` - If the `Value` is a `string`.
     /// * `Err(ValidationError::UnexpectedType` - If the `Value` is not a `string`
-    pub(crate) fn require_str<'a, 'b>(node: &'a Value) -> Result<&'b str, ValidationError>
+    pub(crate) fn require_str<'a, 'b>(node: &'a Value) -> Result<&'b str, ValidationErrorType>
     where
         'a: 'b,
     {
         match node.as_str() {
-            None => Err(ValidationError::UnexpectedType),
+            None => Err(ValidationErrorType::UnexpectedType {
+                expected: OpenApiPrimitives::String,
+                found: node.clone(),
+                section: Section::Specification(SpecificationSection::Components(
+                    ComponentSection::Schemas,
+                )),
+            }),
             Some(string) => Ok(string),
         }
     }
@@ -388,12 +396,18 @@ impl OpenApiTraverser {
     /// * `Err(ValidationError::UnexpectedType)` - If the `Value` is not an object.
     pub(crate) fn require_object<'a, 'b>(
         node: &'a Value,
-    ) -> Result<&'b Map<String, Value>, ValidationError>
+    ) -> Result<&'b Map<String, Value>, ValidationErrorType>
     where
         'a: 'b,
     {
         match node.as_object() {
-            None => Err(ValidationError::UnexpectedType),
+            None => Err(ValidationErrorType::UnexpectedType {
+                expected: OpenApiPrimitives::Object,
+                found: node.clone(),
+                section: Section::Specification(SpecificationSection::Components(
+                    ComponentSection::Schemas,
+                )),
+            }),
             Some(map) => Ok(map),
         }
     }
@@ -408,12 +422,20 @@ impl OpenApiTraverser {
     ///
     /// * `Ok(&Vec<Value>)` - If the `node` is an `array`
     /// * `Err(ValidationError::UnexpectedType)` - If the `node` is not an `array`.
-    pub(crate) fn require_array<'a, 'b>(node: &'a Value) -> Result<&'b Vec<Value>, ValidationError>
+    pub(crate) fn require_array<'a, 'b>(
+        node: &'a Value,
+    ) -> Result<&'b Vec<Value>, ValidationErrorType>
     where
         'a: 'b,
     {
         match node.as_array() {
-            None => Err(ValidationError::UnexpectedType),
+            None => Err(ValidationErrorType::UnexpectedType {
+                expected: OpenApiPrimitives::Array,
+                found: node.clone(),
+                section: Section::Specification(SpecificationSection::Components(
+                    ComponentSection::Schemas,
+                )),
+            }),
             Some(array) => Ok(array),
         }
     }

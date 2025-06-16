@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use http_body_util::{combinators::BoxBody, BodyExt, Empty};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::Service;
@@ -18,12 +18,6 @@ fn empty() -> BoxBody<Bytes, hyper::Error> {
         .boxed()
 }
 
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
-    Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -31,7 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
 
-    let openapi_file = std::fs::read_to_string("openapi-v3.1.0.json").unwrap();
+    let openapi_file =
+        std::fs::read_to_string("examples/hyper-validation/openapi-v3.1.0.json").unwrap();
     let openapi_value: serde_json::Value = serde_json::from_str(&openapi_file).unwrap();
     let validator = Arc::new(OpenApiPayloadValidator::new(openapi_value).unwrap());
     let validation_service = TestHyperService { validator };
