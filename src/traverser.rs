@@ -34,7 +34,7 @@ pub struct OpenApiTraverser {
 }
 
 impl OpenApiTraverser {
-    pub(crate) fn new(specification: Value) -> Self {
+    pub fn new(specification: Value) -> Self {
         Self {
             specification,
             resolved_references: DashMap::new(),
@@ -46,6 +46,65 @@ impl OpenApiTraverser {
         &self.specification
     }
 
+    /// # get_operation
+    ///
+    /// Retrieves an OpenAPI Operation object that matches the provided request path and method.
+    ///
+    /// ## Arguments
+    ///
+    /// * `request_path` - The path of the HTTP request (e.g., "/users/{id}")
+    /// * `request_method` - The HTTP method of the request (e.g., "get", "post")
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(Arc<Operation>)` - A thread-safe reference to the matching Operation object if found
+    /// * `Err(ValidationErrorType::FieldExpected)` - If no matching operation is found in the specification
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use serde_json::json;
+    /// use oasert::traverser::OpenApiTraverser;
+    ///
+    /// // Mini-spec for testing
+    /// let specification = json!({
+    ///     "openapi": "3.0.0",
+    ///     "info": {
+    ///         "title": "Example API",
+    ///         "version": "1.0.0"
+    ///     },
+    ///     "paths": {
+    ///         "/users/{id}": {
+    ///             "get": {
+    ///                 "summary": "Get a user by ID",
+    ///                 "parameters": [
+    ///                     {
+    ///                       "name": "id",
+    ///                       "in": "path",
+    ///                       "description": "ID of user to get",
+    ///                       "required": true,
+    ///                       "schema": {
+    ///                         "type": "integer",
+    ///                         "format": "int64"
+    ///                        }
+    ///                     }
+    ///                 ]
+    ///             }
+    ///         }
+    ///     }
+    /// });
+    ///
+    /// let traverser = OpenApiTraverser::new(specification);
+    /// match traverser.get_operation("/users/123", "get") {
+    ///     Ok(operation) => {
+    ///         // Use the operation object
+    ///         println!("Found operation: {:?}", operation);
+    ///     },
+    ///     Err(err) => {
+    ///         println!("No matching operation found: {:?}", err);
+    ///     }
+    /// }
+    /// ```
     pub fn get_operation(
         &self,
         request_path: &str,
@@ -321,6 +380,16 @@ impl OpenApiTraverser {
         Ok(current_schema)
     }
 
+    /// Retrieves a string value from a specified field in a JSON Value.
+    ///
+    /// # Arguments
+    /// * `node` - A reference to a JSON `Value` from which to extract the field
+    /// * `field` - The name of the field to extract from the JSON `Value`
+    ///
+    /// # Returns
+    /// * `Ok(&str)` - If the field exists and contains a string value
+    /// * `Err(ValidationErrorType::FieldExpected)` - If the field doesn't exist in the node
+    /// * `Err(ValidationErrorType::UnexpectedType)` - If the field exists but doesn't contain a string value
     fn get_as_str<'a, 'b>(node: &'a Value, field: &str) -> Result<&'b str, ValidationErrorType>
     where
         'a: 'b,

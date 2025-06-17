@@ -11,8 +11,8 @@ pub enum Section {
 impl Display for Section {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Section::Specification(spec) => write!(f, "specification {}", spec),
-            Section::Payload(payload) => write!(f, "payload {}", payload),
+            Section::Specification(spec) => write!(f, "Specification --> {}", spec),
+            Section::Payload(payload) => write!(f, "Payload --> {}", payload),
         }
     }
 }
@@ -51,8 +51,10 @@ pub enum SpecificationSection {
 impl Display for SpecificationSection {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            SpecificationSection::Paths(operation) => write!(f, "paths {}", operation),
-            SpecificationSection::Components(component) => write!(f, "components {}", component),
+            SpecificationSection::Paths(operation) => write!(f, "paths --> {}", operation),
+            SpecificationSection::Components(component) => {
+                write!(f, "components --> {}", component)
+            }
             SpecificationSection::Security => write!(f, "security"),
             SpecificationSection::Other => write!(f, "other"),
         }
@@ -96,90 +98,6 @@ impl Display for OperationSection {
         }
     }
 }
-
-//#[derive(Debug)]
-//pub struct ValidationError<'a> {
-//    pub instance: Cow<'a, Value>,
-//    pub path: Cow<'a, JsonPath>,
-//    pub section: Section,
-//    pub error: ValidationErrorType,
-//}
-//
-//impl<'a> ValidationError<'a> {
-//
-//    pub(crate) fn unsupported_spec_version(
-//        instance: &'a Value,
-//        json_path: &'a JsonPath,
-//        section: &Section,
-//    ) -> ValidationError<'a> {
-//        Self {
-//            instance: Cow::Borrowed(instance),
-//            path: Cow::Borrowed(json_path),
-//            section: section.clone(),
-//            error: ValidationErrorType::UnsupportedSpecVersion("Unsupported spec version"),
-//        }
-//    }
-//
-//    pub(crate) fn schema_validation_failed(
-//        instance: &'a Value,
-//        json_path: &'a JsonPath,
-//        section: &Section,
-//    ) -> ValidationError<'a> {
-//        Self {
-//            instance: Cow::Borrowed(instance),
-//            path: Cow::Borrowed(json_path),
-//            section: section.clone(),
-//            error: ValidationErrorType::SchemaValidationFailed("Schema validation failed"),
-//        }
-//    }
-//
-//    pub(crate) fn value_expected(
-//        instance: &'a Value,
-//        json_path: &'a JsonPath,
-//        section: &Section,
-//    ) -> ValidationError<'a> {
-//        Self {
-//            instance: Cow::Borrowed(instance),
-//            path: Cow::Borrowed(json_path),
-//            section: section.clone(),
-//            error: ValidationErrorType::ValueExpected("Value expected"),
-//        }
-//    }
-//
-//    pub(crate) fn circular_reference(
-//        instance: &'a Value,
-//        json_path: &'a JsonPath,
-//        section: &Section,
-//    ) -> ValidationError<'a> {
-//        Self {
-//            instance: Cow::Borrowed(instance),
-//            path: Cow::Borrowed(json_path),
-//            section: section.clone(),
-//            error: ValidationErrorType::CircularReference("Circular reference"),
-//        }
-//    }
-//
-//    pub(crate) fn invalid_ref(
-//        instance: &'a Value,
-//        json_path: &'a JsonPath,
-//        section: &Section,
-//    ) -> ValidationError<'a> {
-//        Self {
-//            instance: Cow::Borrowed(instance),
-//            path: Cow::Borrowed(json_path),
-//            section: section.clone(),
-//            error: ValidationErrorType::InvalidRef("Invalid ref"),
-//        }
-//    }
-//}
-//
-//impl Display for ValidationError<'_> {
-//    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-//        write!(f, "{} : {}", self.error, self.instance)
-//    }
-//}
-//
-//impl std::error::Error for ValidationError<'_> {}
 
 #[derive(Debug)]
 pub enum ValidationErrorType {

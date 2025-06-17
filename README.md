@@ -47,6 +47,7 @@ oasert = "0.1.1"
 3. Pass incoming requests to the validator
 
 See a full example using hyper [here](./examples/hyper-validation/main.rs)
+See a full example using AWS Lambda [here](./examples/aws-lambda-http-validation/main.rs)
 
 ## Components
 

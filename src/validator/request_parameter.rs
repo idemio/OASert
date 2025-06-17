@@ -172,13 +172,8 @@ mod test {
     #[test]
     fn test_validate_valid_query_params() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Valid query string with all parameters
         let query_params = "limit=50&offset=10&filter=active";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_ok());
     }
@@ -186,31 +181,17 @@ mod test {
     #[test]
     fn test_validate_query_params_missing_required() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string missing required 'limit' parameter
         let query_params = "offset=10&filter=active";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err());
-        //        assert!(matches!(
-        //            result.unwrap_err(),
-        //            ValidationError::RequiredParameterMissing
-        //        ));
     }
 
     #[test]
     fn test_validate_query_params_with_only_required() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with only the required parameter
         let query_params = "limit=50";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_ok());
     }
@@ -218,13 +199,8 @@ mod test {
     #[test]
     fn test_validate_query_params_invalid_value() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with an invalid value for 'limit' (exceeds maximum)
         let query_params = "limit=200&offset=10";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err());
     }
@@ -232,13 +208,8 @@ mod test {
     #[test]
     fn test_validate_query_params_non_numeric_for_integer() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with a non-numeric value for 'limit' which requires integer
         let query_params = "limit=abc&offset=10";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err());
     }
@@ -246,13 +217,8 @@ mod test {
     #[test]
     fn test_validate_query_params_invalid_enum_value() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with an invalid enum value for 'filter'
         let query_params = "limit=50&filter=invalid";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err());
     }
@@ -260,29 +226,16 @@ mod test {
     #[test]
     fn test_validate_query_params_empty_string() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Empty query string
         let query_params = "";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err());
-        //        assert!(matches!(
-        //            result.unwrap_err(),
-        //            ValidationError::RequiredParameterMissing
-        //        ));
     }
 
     #[test]
     fn test_validate_query_params_malformed_query() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Malformed query string (missing value)
         let query_params = "limit=50&offset=";
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err());
@@ -291,54 +244,32 @@ mod test {
     #[test]
     fn test_validate_query_params_duplicate_parameters() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with duplicate parameters (the last one should be used)
         let query_params = "limit=50&limit=75";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_ok());
-
-        // In this implementation, the last value overrides previous ones
-        // We can't easily test the exact value used, but we know it should validate
     }
 
     #[test]
     fn test_validate_query_params_url_encoded_values() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with URL-encoded values
         let query_params = "limit=50&filter=active%20items";
-
-        // This test depends on how the validator handles URL encoding
-        // If it doesn't decode values, this might fail
         let result = validator.validate_request_query_parameters(&operation, query_params);
-        assert!(result.is_err()); // "active items" is not in the enum
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_query_params_extra_parameters() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Query string with extra parameters not defined in the schema
         let query_params = "limit=50&extra=value";
-
-        // Extra parameters should be ignored
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_query_params_no_parameters_defined() {
-        // Create a validator with no parameters defined
         let spec = json!({
             "openapi": "3.0.0",
             "info": {
@@ -351,15 +282,9 @@ mod test {
                 }
             }
         });
-
         let validator = OpenApiPayloadValidator::new(spec).unwrap();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Any query string should be valid when no parameters are defined
         let query_params = "param1=value1&param2=value2";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_ok());
     }
@@ -367,31 +292,20 @@ mod test {
     #[test]
     fn test_validate_query_params_parsing_edge_cases() {
         let validator = create_validator();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Test with various edge cases in query string parsing
-
-        // 1. Query string with just an ampersand
         let query_params = "&";
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_err()); // Missing required parameter
-
-        // 2. Query string with just a key (no equals sign)
         let query_params = "limit";
         let result = validator.validate_request_query_parameters(&operation, query_params);
-        assert!(result.is_err()); // Malformed query and missing required parameter
-
-        // 3. Query string with just a key and equals sign
+        assert!(result.is_err());
         let query_params = "limit=";
         let result = validator.validate_request_query_parameters(&operation, query_params);
-        assert!(result.is_err()); // Malformed value for required parameter
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_query_params_with_array_reference() {
-        // Create a validator with a parameter that references a component
         let spec = json!({
             "openapi": "3.0.0",
             "info": {
@@ -423,15 +337,9 @@ mod test {
                 }
             }
         });
-
         let validator = OpenApiPayloadValidator::new(spec).unwrap();
-
-        // Get the operation object
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Valid query string
         let query_params = "limit=10";
-
         let result = validator.validate_request_query_parameters(&operation, query_params);
         assert!(result.is_ok());
     }

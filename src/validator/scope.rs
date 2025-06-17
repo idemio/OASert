@@ -74,7 +74,6 @@ impl<'a> RequestScopeValidator<'a> {
 }
 
 impl<'a> Validator for RequestScopeValidator<'a> {
-    /// Validates whether a request has at least one of the required scopes specified in the operation's security definitions.
     fn validate(
         &self,
         traverser: &OpenApiTraverser,
@@ -149,7 +148,6 @@ mod test {
 
     #[test]
     fn test_validate_request_scopes_success() {
-        // Create a validator with OAuth2 security definition
         let validator = create_validator_with_security_definitions(json!({
             "oauth2": {
                 "type": "oauth2",
@@ -164,20 +162,14 @@ mod test {
                 }
             }
         }));
-
-        // Create an operation requiring "read" and "write" scopes
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Test with matching scopes
         let scopes = vec!["read".to_string(), "write".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_request_scopes_success_with_extra_scopes() {
-        // Create a validator with OAuth2 security definition
         let validator = create_validator_with_security_definitions(json!({
             "oauth2": {
                 "type": "oauth2",
@@ -193,20 +185,14 @@ mod test {
                 }
             }
         }));
-
-        // Create an operation requiring "read" and "write" scopes
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Test with matching scopes plus an extra one
         let scopes = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_request_scopes_missing_required_scope() {
-        // Create a validator with OAuth2 security definition
         let validator = create_validator_with_security_definitions(json!({
             "oauth2": {
                 "type": "oauth2",
@@ -221,20 +207,14 @@ mod test {
                 }
             }
         }));
-
-        // Create an operation requiring "read" and "write" scopes
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Test with a missing "write" scope
         let scopes = vec!["read".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_request_scopes_empty_scopes() {
-        // Create a validator with OAuth2 security definition
         let validator = create_validator_with_security_definitions(json!({
             "oauth2": {
                 "type": "oauth2",
@@ -249,20 +229,14 @@ mod test {
                 }
             }
         }));
-
-        // Create an operation requiring "read" and "write" scopes
         let operation = validator.traverser().get_operation("/test", "get").unwrap();
-
-        // Test with empty scopes
         let scopes = vec![];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_request_scopes_multiple_security_requirements_one_satisfied() {
-        // Create a validator with multiple security definitions
         let validator = create_validator_with_security_definitions(json!({
             "oauth2": {
                 "type": "oauth2",
@@ -282,17 +256,12 @@ mod test {
                 "in": "header"
             }
         }));
-
-        // Create an operation with alternative security requirements
         let operation = create_operation_with_security(json!([
             { "oauth2": ["read", "write"] },
             { "apiKey": [] }
         ]));
-
-        // Test with satisfying the first requirement but not the second
         let scopes = vec!["read".to_string(), "write".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_ok());
     }
 
@@ -334,16 +303,10 @@ mod test {
 
     #[test]
     fn test_validate_request_scopes_no_security_requirement() {
-        // Create a validator without security definitions
         let validator = create_validator_with_security_definitions(json!({}));
-
-        // Create an operation without security requirements
         let operation = create_operation_with_security(json!([]));
-
-        // Test with any scopes
         let scopes = vec!["read".to_string(), "write".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_ok());
     }
 
@@ -378,7 +341,6 @@ mod test {
 
     #[test]
     fn test_validate_request_scopes_with_malformed_security_requirement() {
-        // Create a validator with OAuth2 security definition
         let validator = create_validator_with_security_definitions(json!({
             "oauth2": {
                 "type": "oauth2",
@@ -393,20 +355,14 @@ mod test {
                 }
             }
         }));
-
-        // Create an operation with a malformed security requirement (not an array of objects)
         let operation = create_operation_with_security(json!("malformed"));
-
-        // Test with any scopes
         let scopes = vec!["read".to_string(), "write".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_request_scopes_with_security_scheme_without_scopes() {
-        // Create a validator with API key security definition
         let validator = create_validator_with_security_definitions(json!({
             "apiKey": {
                 "type": "apiKey",
@@ -414,17 +370,11 @@ mod test {
                 "in": "header"
             }
         }));
-
-        // Create an operation requiring API key authentication (no scopes)
         let operation = create_operation_with_security(json!([
             { "apiKey": [] }
         ]));
-
-        // Test with empty scopes
         let scopes = vec![];
         let result = validator.validate_request_scopes(&operation, &scopes);
-
-        // Should pass since API key schemes don't require scopes
         assert!(result.is_ok());
     }
 }

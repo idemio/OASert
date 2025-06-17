@@ -74,7 +74,7 @@ where
     fn method(&self) -> &Method;
     fn path(&self) -> &str;
     fn headers(&self) -> &HeaderMap;
-    fn body(&self) -> Option<&T>;
+    fn body(&self) -> Option<Value>;
     fn query(&self) -> Option<&str>;
 }
 
@@ -94,8 +94,11 @@ where
         &self.headers()
     }
 
-    fn body(&self) -> Option<&T> {
-        Some(&self.body())
+    fn body(&self) -> Option<Value> {
+        match serde_json::to_value(self.body()) {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
     }
 
     fn query(&self) -> Option<&str> {
