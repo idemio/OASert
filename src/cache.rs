@@ -1,8 +1,9 @@
-use std::fmt::{Display, Formatter};
-use std::sync::{Arc, OnceLock};
+use crate::error::ValidationErrorType;
+use crate::validator::OpenApiPayloadValidator;
 use dashmap::{DashMap, VacantEntry};
 use serde_json::Value;
-use crate::validator::{OpenApiPayloadValidator, ValidationError};
+use std::fmt::{Display, Formatter};
+use std::sync::{Arc, OnceLock};
 
 /// Global instance of the validator cache.
 ///
@@ -17,7 +18,6 @@ pub fn global_validator_cache() -> &'static ValidatorCache {
     GLOBAL_CACHE.get_or_init(ValidatorCache::new)
 }
 
-
 /// Error types for cache operations
 #[derive(Debug)]
 pub enum CacheError {
@@ -26,7 +26,7 @@ pub enum CacheError {
     /// The validator with the specified ID already exists in the cache
     ValidatorAlreadyExists,
     /// Attempted to create a new validator but failed.
-    FailedToCreateValidator(ValidationError)
+    FailedToCreateValidator(ValidationErrorType),
 }
 
 impl Display for CacheError {
@@ -34,7 +34,9 @@ impl Display for CacheError {
         match self {
             CacheError::ValidatorNotFound => write!(f, "Validator not found in cache"),
             CacheError::ValidatorAlreadyExists => write!(f, "Validator already exists in cache"),
-            CacheError::FailedToCreateValidator(err) => write!(f, "Failed to create new validator: {}", err)
+            CacheError::FailedToCreateValidator(err) => {
+                write!(f, "Failed to create new validator: {}", err)
+            }
         }
     }
 }
@@ -69,26 +71,28 @@ impl ValidatorCache {
     /// # Returns
     /// * `Ok(())` - If the validator was successfully inserted
     /// * `Err(CacheError)` - If a validator with the same ID already exists
-    pub fn insert(&self, id: String, spec: Value) -> Result<Arc<OpenApiPayloadValidator>, CacheError> {
+    pub fn insert(
+        &self,
+        id: String,
+        spec: Value,
+    ) -> Result<Arc<OpenApiPayloadValidator>, CacheError> {
         match self.cache.entry(id) {
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                Err(CacheError::ValidatorAlreadyExists)
-            },
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                Self::create_validator(entry, spec)
-            }
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(CacheError::ValidatorAlreadyExists),
+            dashmap::mapref::entry::Entry::Vacant(entry) => Self::create_validator(entry, spec),
         }
     }
-    
-    fn create_validator(entry: VacantEntry<String, Arc<OpenApiPayloadValidator>>, spec: Value) -> Result<Arc<OpenApiPayloadValidator>, CacheError> {
+
+    fn create_validator(
+        entry: VacantEntry<String, Arc<OpenApiPayloadValidator>>,
+        spec: Value,
+    ) -> Result<Arc<OpenApiPayloadValidator>, CacheError> {
         match OpenApiPayloadValidator::new(spec) {
             Ok(validator) => {
                 log::debug!("Added validator to cache with ID: {}", entry.key());
                 let validator = Arc::new(validator);
                 entry.insert(validator.clone());
-
                 Ok(validator)
-            },
+            }
             Err(e) => {
                 log::error!("Failed to create validator for ID {}: {}", entry.key(), e);
                 Err(CacheError::FailedToCreateValidator(e))
@@ -146,17 +150,16 @@ impl ValidatorCache {
     ///
     /// * `Result<Arc<OpenApiPayloadValidator>, ValidationError>` - The validator on success,
     ///   or a ValidationError if a new validator couldn't be created
-    pub fn get_or_insert(&self, id: String, spec: Value) -> Result<Arc<OpenApiPayloadValidator>, CacheError> {
+    pub fn get_or_insert(
+        &self,
+        id: String,
+        spec: Value,
+    ) -> Result<Arc<OpenApiPayloadValidator>, CacheError> {
         match self.cache.entry(id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                Ok(Arc::clone(entry.get()))
-            },
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                Self::create_validator(entry, spec)
-            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => Ok(Arc::clone(entry.get())),
+            dashmap::mapref::entry::Entry::Vacant(entry) => Self::create_validator(entry, spec),
         }
     }
-
 
     /// Checks if a validator with the given ID exists in the cache.
     ///
@@ -212,8 +215,12 @@ mod tests {
         let spec = json!({
             "openapi": "3.1.0"
         });
-        let validator1 = cache.get_or_insert("test".to_string(), spec.clone()).unwrap();
-        let validator2 = cache.get_or_insert("test".to_string(), json!({"openapi": "3.0.0"})).unwrap();
+        let validator1 = cache
+            .get_or_insert("test".to_string(), spec.clone())
+            .unwrap();
+        let validator2 = cache
+            .get_or_insert("test".to_string(), json!({"openapi": "3.0.0"}))
+            .unwrap();
         assert!(Arc::ptr_eq(&validator1, &validator2));
         assert_eq!(cache.len(), 1);
     }
@@ -245,4 +252,3 @@ mod tests {
         cache.clear();
     }
 }
-
