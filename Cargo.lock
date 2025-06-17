@@ -870,6 +870,7 @@ dependencies = [
  "jsonschema",
  "lambda_http",
  "log",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tokio",

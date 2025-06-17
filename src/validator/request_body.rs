@@ -10,12 +10,15 @@ use serde_json::Value;
 
 pub(crate) struct RequestBodyValidator<'a> {
     request_instance: Option<&'a Value>,
-    content_type: Option<String>,
+    content_type: Option<&'a str>,
     section: Section,
 }
 
 impl<'a> RequestBodyValidator<'a> {
-    pub(crate) fn new<'b>(request_instance: Option<&'b Value>, content_type: Option<String>) -> Self
+    pub(crate) fn new<'b>(
+        request_instance: Option<&'b Value>,
+        content_type: Option<&'a str>,
+    ) -> Self
     where
         'b: 'a,
     {
@@ -72,7 +75,7 @@ impl<'a> Validator for RequestBodyValidator<'a> {
         let body = self.request_instance;
 
         let req_body_def = match traverser.get_optional(&op_def, REQUEST_BODY_FIELD)? {
-            None if body.is_some() => {
+            None if body.is_some_and(|body| !body.is_null()) => {
                 return Err(ValidationErrorType::SectionExpected(
                     Section::Specification(SpecificationSection::Paths(
                         OperationSection::RequestBody,
