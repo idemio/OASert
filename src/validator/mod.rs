@@ -2,14 +2,15 @@ mod request_body;
 mod request_parameter;
 mod scope;
 
-use crate::error::{Section, SpecificationSection, ValidationErrorType};
+use crate::error::{OperationSection, Section, SpecificationSection, ValidationErrorType};
 use crate::traverser::OpenApiTraverser;
 use crate::types::json_path::JsonPath;
-use crate::types::{HttpLike, OpenApiVersion, Operation, ParameterLocation};
+use crate::types::version::OpenApiVersion;
+use crate::types::{HttpLike, Operation, ParameterLocation};
 use crate::validator::request_body::RequestBodyValidator;
 use crate::validator::request_parameter::RequestParameterValidator;
 use crate::validator::scope::RequestScopeValidator;
-use crate::{OPENAPI_FIELD, REF_FIELD};
+use crate::{OPENAPI_FIELD, PATHS_FIELD, REF_FIELD};
 use http::HeaderMap;
 use jsonschema::{Resource, ValidationOptions, Validator as JsonValidator};
 use serde_json::{json, Value};
@@ -56,10 +57,18 @@ impl OpenApiPayloadValidator {
             .with_draft(draft)
             .with_resource("@@inner", resource);
 
-        Ok(Self {
-            traverser: OpenApiTraverser::new(value),
-            options,
-        })
+        // Create the traverser with owned value
+        let traverser = match OpenApiTraverser::new(value) {
+            Ok(traverser) => traverser,
+            Err(_) => {
+                return Err(ValidationErrorType::FieldExpected(
+                    PATHS_FIELD.to_string(),
+                    Section::Specification(SpecificationSection::Paths(OperationSection::Other)),
+                ));
+            }
+        };
+
+        Ok(Self { traverser, options })
     }
 
     pub fn traverser(&self) -> &OpenApiTraverser {
@@ -151,7 +160,8 @@ impl OpenApiPayloadValidator {
         path: &str,
         method: &str,
     ) -> Result<Arc<Operation>, ValidationErrorType> {
-        self.traverser.get_operation(path, method)
+        self.traverser
+            .get_operation_from_path_and_method(path, method)
     }
 
     /// # validate_request_body
@@ -270,7 +280,7 @@ impl OpenApiPayloadValidator {
     {
         let operation = self
             .traverser
-            .get_operation(request.path(), request.method().as_str())?;
+            .get_operation_from_path_and_method(request.path(), request.method().as_str())?;
 
         self.validate_request_body(&operation, request)?;
         self.validate_request_header_params(&operation, request.headers())?;

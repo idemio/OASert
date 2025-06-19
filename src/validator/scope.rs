@@ -9,15 +9,15 @@ use jsonschema::ValidationOptions;
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub(crate) struct RequestScopeValidator<'a> {
-    request_instance: &'a Vec<String>,
+pub(crate) struct RequestScopeValidator<'validator> {
+    request_instance: &'validator Vec<String>,
     section: Section,
 }
 
-impl<'a> RequestScopeValidator<'a> {
-    pub(crate) fn new<'b>(request_instance: &'b Vec<String>) -> Self
+impl<'validator> RequestScopeValidator<'validator> {
+    pub(crate) fn new<'node>(request_instance: &'node Vec<String>) -> Self
     where
-        'b: 'a,
+        'node: 'validator,
     {
         Self {
             request_instance,
@@ -73,7 +73,7 @@ impl<'a> RequestScopeValidator<'a> {
     }
 }
 
-impl<'a> Validator for RequestScopeValidator<'a> {
+impl Validator for RequestScopeValidator<'_> {
     fn validate(
         &self,
         traverser: &OpenApiTraverser,
@@ -162,7 +162,10 @@ mod test {
                 }
             }
         }));
-        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+        let operation = validator
+            .traverser()
+            .get_operation_from_path_and_method("/test", "get")
+            .unwrap();
         let scopes = vec!["read".to_string(), "write".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
         assert!(result.is_ok());
@@ -185,7 +188,10 @@ mod test {
                 }
             }
         }));
-        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+        let operation = validator
+            .traverser()
+            .get_operation_from_path_and_method("/test", "get")
+            .unwrap();
         let scopes = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
         assert!(result.is_ok());
@@ -207,7 +213,10 @@ mod test {
                 }
             }
         }));
-        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+        let operation = validator
+            .traverser()
+            .get_operation_from_path_and_method("/test", "get")
+            .unwrap();
         let scopes = vec!["read".to_string()];
         let result = validator.validate_request_scopes(&operation, &scopes);
         assert!(result.is_err());
@@ -229,7 +238,10 @@ mod test {
                 }
             }
         }));
-        let operation = validator.traverser().get_operation("/test", "get").unwrap();
+        let operation = validator
+            .traverser()
+            .get_operation_from_path_and_method("/test", "get")
+            .unwrap();
         let scopes = vec![];
         let result = validator.validate_request_scopes(&operation, &scopes);
         assert!(result.is_err());

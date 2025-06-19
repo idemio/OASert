@@ -8,19 +8,19 @@ use crate::{CONTENT_FIELD, REQUEST_BODY_FIELD, REQUIRED_FIELD, SCHEMA_FIELD};
 use jsonschema::ValidationOptions;
 use serde_json::Value;
 
-pub(crate) struct RequestBodyValidator<'a> {
-    request_instance: Option<&'a Value>,
-    content_type: Option<&'a str>,
+pub(crate) struct RequestBodyValidator<'validator> {
+    request_instance: Option<&'validator Value>,
+    content_type: Option<&'validator str>,
     section: Section,
 }
 
-impl<'a> RequestBodyValidator<'a> {
-    pub(crate) fn new<'b>(
-        request_instance: Option<&'b Value>,
-        content_type: Option<&'a str>,
+impl<'validator> RequestBodyValidator<'validator> {
+    pub(crate) fn new<'node>(
+        request_instance: Option<&'node Value>,
+        content_type: Option<&'validator str>,
     ) -> Self
     where
-        'b: 'a,
+        'node: 'validator,
     {
         Self {
             request_instance,
@@ -63,7 +63,7 @@ impl<'a> RequestBodyValidator<'a> {
     }
 }
 
-impl<'a> Validator for RequestBodyValidator<'a> {
+impl Validator for RequestBodyValidator<'_> {
     /// Validates the request body of an OpenAPI operation against the specification.
     fn validate(
         &self,

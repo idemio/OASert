@@ -1,11 +1,9 @@
 pub mod json_path;
 pub mod primitive;
-
-use crate::error::{Section, SpecificationSection, ValidationErrorType};
+pub mod version;
 
 use crate::types::json_path::JsonPath;
 use http::{HeaderMap, Method};
-use jsonschema::Draft;
 use serde_json::Value;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -33,37 +31,6 @@ impl Display for ParameterLocation {
             ParameterLocation::Path => "path",
         });
         write!(f, "{}", str)
-    }
-}
-
-pub enum OpenApiVersion {
-    V30x,
-    V31x,
-}
-
-impl FromStr for OpenApiVersion {
-    type Err = ValidationErrorType;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with("3.1") {
-            Ok(OpenApiVersion::V31x)
-        } else if s.starts_with("3.0") {
-            Ok(OpenApiVersion::V30x)
-        } else {
-            Err(ValidationErrorType::UnsupportedSpecVersion(
-                s.to_string(),
-                Section::Specification(SpecificationSection::Other),
-            ))
-        }
-    }
-}
-
-impl OpenApiVersion {
-    pub(crate) fn get_draft(&self) -> Draft {
-        match self {
-            OpenApiVersion::V30x => Draft::Draft4,
-            OpenApiVersion::V31x => Draft::Draft202012,
-        }
     }
 }
 
