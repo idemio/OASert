@@ -35,8 +35,14 @@ impl<'validator> RequestBodyValidator<'validator> {
         body_schema: &Value,
         request_body: Option<&Value>,
     ) -> Result<(), ValidationErrorType> {
-        if let Some(required_fields) = traverser.get_optional(body_schema, REQUIRED_FIELD)? {
-            let required_fields = OpenApiTraverser::require_array(required_fields.value())?;
+        if let Some(required_fields) = match traverser.get_optional(body_schema, REQUIRED_FIELD) {
+            Ok(req) => req,
+            Err(_) => todo!(),
+        } {
+            let required_fields = match OpenApiTraverser::require_array(required_fields.value()) {
+                Ok(required_fields) => required_fields,
+                Err(_) => todo!(),
+            };
 
             // if the body provided is empty and required fields are present, then it's an invalid body.
             if !required_fields.is_empty() && request_body.is_none() {
@@ -47,7 +53,10 @@ impl<'validator> RequestBodyValidator<'validator> {
 
             if let Some(body) = request_body {
                 for required in required_fields {
-                    let required_field = OpenApiTraverser::require_str(required)?;
+                    let required_field = match OpenApiTraverser::require_str(required) {
+                        Ok(required_field) => required_field,
+                        Err(_) => todo!(),
+                    };
 
                     // if the current required field is not present in the body, then it's a failure.
                     if body.get(required_field).is_none() {
@@ -74,7 +83,10 @@ impl Validator for RequestBodyValidator<'_> {
         let (op_def, mut op_path) = (&op.data, op.path.clone());
         let body = self.request_instance;
 
-        let req_body_def = match traverser.get_optional(&op_def, REQUEST_BODY_FIELD)? {
+        let req_body_def = match match traverser.get_optional(&op_def, REQUEST_BODY_FIELD) {
+            Ok(req_body_def) => req_body_def,
+            Err(_) => todo!(),
+        } {
             None if body.is_some_and(|body| !body.is_null()) => {
                 return Err(ValidationErrorType::SectionExpected(
                     Section::Specification(SpecificationSection::Paths(
@@ -86,20 +98,31 @@ impl Validator for RequestBodyValidator<'_> {
             Some(val) => val,
         };
 
-        let is_body_required = traverser.get_optional(req_body_def.value(), REQUIRED_FIELD)?;
+        let is_body_required = match traverser.get_optional(req_body_def.value(), REQUIRED_FIELD) {
+            Ok(is_body_required) => is_body_required,
+            Err(_) => todo!(),
+        };
 
         let is_body_required: bool = match is_body_required {
             None => true,
             Some(val) => val.value().as_bool().unwrap_or(true),
         };
         if let Some(ctype) = &self.content_type {
-            let content_def = traverser.get_required(req_body_def.value(), CONTENT_FIELD)?;
+            let content_def = match traverser.get_required(req_body_def.value(), CONTENT_FIELD) {
+                Ok(content_def) => content_def,
+                Err(_) => todo!(),
+            };
 
-            let media_def = traverser.get_required(content_def.value(), &ctype)?;
-
-            let media_schema = traverser.get_required(media_def.value(), SCHEMA_FIELD)?;
-
+            let media_def = match traverser.get_required(content_def.value(), &ctype) {
+                Ok(media_def) => media_def,
+                Err(_) => todo!(),
+            };
+            let media_schema = match traverser.get_required(media_def.value(), SCHEMA_FIELD) {
+                Ok(media_schema) => media_schema,
+                Err(_) => todo!(),
+            };
             Self::check_required_body(traverser, media_schema.value(), body)?;
+
             if let Some(body_instance) = body {
                 op_path
                     .add(REQUEST_BODY_FIELD)

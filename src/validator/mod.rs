@@ -160,8 +160,13 @@ impl OpenApiPayloadValidator {
         path: &str,
         method: &str,
     ) -> Result<Arc<Operation>, ValidationErrorType> {
-        self.traverser
+        match self
+            .traverser
             .get_operation_from_path_and_method(path, method)
+        {
+            Ok(op) => Ok(op),
+            Err(_) => todo!(),
+        }
     }
 
     /// # validate_request_body
@@ -278,10 +283,7 @@ impl OpenApiPayloadValidator {
     where
         T: serde::ser::Serialize,
     {
-        let operation = self
-            .traverser
-            .get_operation_from_path_and_method(request.path(), request.method().as_str())?;
-
+        let operation = self.find_operation(request.path(), request.method().as_str())?;
         self.validate_request_body(&operation, request)?;
         self.validate_request_header_params(&operation, request.headers())?;
 

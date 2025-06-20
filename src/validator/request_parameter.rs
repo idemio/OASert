@@ -1,5 +1,5 @@
 use crate::error::{OperationSection, Section, SpecificationSection, ValidationErrorType};
-use crate::traverser::OpenApiTraverser;
+use crate::traverser::{OpenApiTraverser, TraverserError};
 use crate::types::primitive::OpenApiPrimitives;
 use crate::types::{Operation, ParameterLocation};
 use crate::validator::Validator;
@@ -41,29 +41,47 @@ impl Validator for RequestParameterValidator<'_> {
         validation_options: &ValidationOptions,
     ) -> Result<(), ValidationErrorType> {
         let op_def = &op.data;
-        let param_defs = match traverser.get_optional(op_def, PARAMETERS_FIELD) {
+        let param_defs = match match traverser.get_optional(op_def, PARAMETERS_FIELD) {
             Ok(res) => Ok(res),
             Err(e) => match e {
-                ValidationErrorType::FieldExpected(_, _) => Ok(None),
+                TraverserError::MissingField(_) => Ok(None),
                 _ => Err(e),
             },
-        }?;
+        } {
+            Ok(defs) => defs,
+            Err(_) => todo!(),
+        };
 
         match param_defs {
             Some(param_defs) => {
-                let param_defs = OpenApiTraverser::require_array(param_defs.value())?;
+                let param_defs = match OpenApiTraverser::require_array(param_defs.value()) {
+                    Ok(param_defs) => param_defs,
+                    Err(_) => todo!(),
+                };
 
                 for param_def in param_defs {
                     // Only look at parameters that match the current section.
-                    let loc = traverser.get_required(param_def, IN_FIELD)?;
-                    let loc = OpenApiTraverser::require_str(loc.value())?;
+                    let loc = match OpenApiTraverser::get_as_str(param_def, IN_FIELD) {
+                        Ok(loc) => loc,
+                        Err(_) => todo!(),
+                    };
 
                     if loc.to_lowercase() == self.parameter_location.to_string().to_lowercase() {
-                        let param_name = traverser.get_required(param_def, NAME_FIELD)?;
+                        let param_name = match traverser.get_required(param_def, NAME_FIELD) {
+                            Ok(param_name) => param_name,
+                            Err(_) => todo!(),
+                        };
 
-                        let param_name = OpenApiTraverser::require_str(param_name.value())?;
+                        let param_name = match OpenApiTraverser::require_str(param_name.value()) {
+                            Ok(param_name) => param_name,
+                            Err(_) => todo!(),
+                        };
+
                         let is_param_required =
-                            traverser.get_optional(param_def, REQUIRED_FIELD)?;
+                            match traverser.get_optional(param_def, REQUIRED_FIELD) {
+                                Ok(is_param_required) => is_param_required,
+                                Err(_) => todo!(),
+                            };
 
                         let is_param_required: bool = match is_param_required {
                             None => false,
@@ -72,7 +90,10 @@ impl Validator for RequestParameterValidator<'_> {
                             }
                         };
 
-                        let param_schema = traverser.get_required(param_def, SCHEMA_FIELD)?;
+                        let param_schema = match traverser.get_required(param_def, SCHEMA_FIELD) {
+                            Ok(param_schema) => param_schema,
+                            Err(_) => todo!(),
+                        };
 
                         let param_schema = param_schema.value();
                         if let Some(req_param_val) = self.request_instance.get(param_name) {

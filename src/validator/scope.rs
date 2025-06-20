@@ -32,7 +32,10 @@ impl<'validator> RequestScopeValidator<'validator> {
         request_scopes: &HashSet<&str>,
     ) -> Result<(), ValidationErrorType> {
         // get the array of maps
-        let security_defs = OpenApiTraverser::require_array(security_definitions)?;
+        let security_defs = match OpenApiTraverser::require_array(security_definitions) {
+            Ok(security_defs) => security_defs,
+            Err(_) => todo!(),
+        };
 
         if security_defs.is_empty() {
             log::debug!("Definition is empty, scopes automatically pass");
@@ -41,15 +44,26 @@ impl<'validator> RequestScopeValidator<'validator> {
 
         for security_definition in security_defs {
             // convert to map
-            let security_def = OpenApiTraverser::require_object(security_definition)?;
+            let security_def = match OpenApiTraverser::require_object(security_definition) {
+                Ok(security_def) => security_def,
+                Err(_) => todo!(),
+            };
+
             for (schema_name, scope_list) in security_def {
                 // convert to list
-                let scope_list = OpenApiTraverser::require_array(scope_list)?;
+                let scope_list = match OpenApiTraverser::require_array(scope_list) {
+                    Ok(scope_list) => scope_list,
+                    Err(_) => todo!(),
+                };
+
                 let mut scopes_match_schema = true;
 
                 // check to see if the scope is found in our request scopes
                 'scope_match: for scope in scope_list {
-                    let scope = OpenApiTraverser::require_str(scope)?;
+                    let scope = match OpenApiTraverser::require_str(scope) {
+                        Ok(scope) => scope,
+                        Err(_) => todo!(),
+                    };
                     if !request_scopes.contains(scope) {
                         scopes_match_schema = false;
                         break 'scope_match;
@@ -81,15 +95,23 @@ impl Validator for RequestScopeValidator<'_> {
         _validation_options: &ValidationOptions,
     ) -> Result<(), ValidationErrorType> {
         let op = &op.data;
-        let scopes: HashSet<&str> = self.request_instance.iter().map(|s| s.as_str()).collect();
 
-        let security_defs = traverser.get_optional(op, SECURITY_FIELD)?;
+        let scopes: HashSet<&str> = self.request_instance.iter().map(|s| s.as_str()).collect();
+        let security_defs = match traverser.get_optional(op, SECURITY_FIELD) {
+            Ok(security_defs) => security_defs,
+            Err(_) => todo!(),
+        };
+
         if let Some(security_defs) = security_defs {
             return Self::validate_scopes_using_schema(security_defs.value(), &scopes);
         }
 
         let global_security_defs =
-            traverser.get_optional(traverser.specification(), SECURITY_FIELD)?;
+            match traverser.get_optional(traverser.specification(), SECURITY_FIELD) {
+                Ok(global_security_defs) => global_security_defs,
+                Err(_) => todo!(),
+            };
+
         if let Some(security_definitions) = global_security_defs {
             return Self::validate_scopes_using_schema(security_definitions.value(), &scopes);
         }
