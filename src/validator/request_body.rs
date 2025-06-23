@@ -1,6 +1,4 @@
-use crate::error::{
-    OperationSection, PayloadSection, Section, SpecificationSection, ValidationErrorType,
-};
+use crate::error::ValidationErrorType;
 use crate::traverser::OpenApiTraverser;
 use crate::types::Operation;
 use crate::validator::Validator;
@@ -8,24 +6,22 @@ use crate::{CONTENT_FIELD, REQUEST_BODY_FIELD, REQUIRED_FIELD, SCHEMA_FIELD};
 use jsonschema::ValidationOptions;
 use serde_json::Value;
 
-pub(crate) struct RequestBodyValidator<'a> {
-    request_instance: Option<&'a Value>,
-    content_type: Option<&'a str>,
-    section: Section,
+pub(crate) struct RequestBodyValidator<'v> {
+    request_instance: Option<&'v Value>,
+    content_type: Option<&'v str>,
 }
 
-impl<'a> RequestBodyValidator<'a> {
-    pub(crate) fn new<'b>(
-        request_instance: Option<&'b Value>,
-        content_type: Option<&'a str>,
+impl<'v> RequestBodyValidator<'v> {
+    pub(crate) fn new<'node>(
+        request_instance: Option<&'node Value>,
+        content_type: Option<&'v str>,
     ) -> Self
     where
-        'b: 'a,
+        'node: 'v,
     {
         Self {
             request_instance,
             content_type,
-            section: Section::Payload(PayloadSection::Body),
         }
     }
 
@@ -34,27 +30,62 @@ impl<'a> RequestBodyValidator<'a> {
         traverser: &OpenApiTraverser,
         body_schema: &Value,
         request_body: Option<&Value>,
+        operation_id: &str,
     ) -> Result<(), ValidationErrorType> {
-        if let Some(required_fields) = traverser.get_optional(body_schema, REQUIRED_FIELD)? {
-            let required_fields = OpenApiTraverser::require_array(required_fields.value())?;
+        if let Some(required_fields) = match traverser.get_optional(body_schema, REQUIRED_FIELD) {
+            Ok(req) => req,
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    &format!(
+                        "Failed to get 'required' in 'requestBody' --> 'schema' in operation '{}'",
+                        operation_id,
+                    ),
+                ));
+            }
+        } {
+            let required_fields = match OpenApiTraverser::require_array(required_fields.value()) {
+                Ok(required_fields) => required_fields,
+                Err(e) => {
+                    return Err(ValidationErrorType::traversal_failed(
+                        e,
+                        &format!(
+                            "Failed to parse 'required' as a vector in operation '{}'",
+                            operation_id
+                        ),
+                    ));
+                }
+            };
 
             // if the body provided is empty and required fields are present, then it's an invalid body.
             if !required_fields.is_empty() && request_body.is_none() {
-                return Err(ValidationErrorType::SectionExpected(Section::Payload(
-                    PayloadSection::Body,
+                return Err(ValidationErrorType::assertion_failed(&format!(
+                    "Request body is missing, but the request body has required fields in operation '{}'",
+                    operation_id,
                 )));
             }
 
             if let Some(body) = request_body {
                 for required in required_fields {
-                    let required_field = OpenApiTraverser::require_str(required)?;
+                    let required_field = match OpenApiTraverser::require_str(required) {
+                        Ok(required_field) => required_field,
+                        Err(e) => {
+                            return Err(ValidationErrorType::traversal_failed(
+                                e,
+                                &format!(
+                                    "Failed to parse required index as a string in operation '{}'",
+                                    operation_id
+                                ),
+                            ));
+                        }
+                    };
 
                     // if the current required field is not present in the body, then it's a failure.
                     if body.get(required_field).is_none() {
-                        return Err(ValidationErrorType::FieldExpected(
-                            required_field.to_string(),
-                            Section::Payload(PayloadSection::Body),
-                        ));
+                        return Err(ValidationErrorType::assertion_failed(&format!(
+                            "'{}' is required but missing from the requestBody in operation '{}'",
+                            required_field, operation_id
+                        )));
                     }
                 }
             }
@@ -63,7 +94,7 @@ impl<'a> RequestBodyValidator<'a> {
     }
 }
 
-impl<'a> Validator for RequestBodyValidator<'a> {
+impl Validator for RequestBodyValidator<'_> {
     /// Validates the request body of an OpenAPI operation against the specification.
     fn validate(
         &self,
@@ -74,63 +105,113 @@ impl<'a> Validator for RequestBodyValidator<'a> {
         let (op_def, mut op_path) = (&op.data, op.path.clone());
         let body = self.request_instance;
 
-        let req_body_def = match traverser.get_optional(&op_def, REQUEST_BODY_FIELD)? {
-            None if body.is_some_and(|body| !body.is_null()) => {
-                return Err(ValidationErrorType::SectionExpected(
-                    Section::Specification(SpecificationSection::Paths(
-                        OperationSection::RequestBody,
-                    )),
+        let operation_id = OpenApiTraverser::get_as_str(&op_def, "operationId")
+            .unwrap_or_else(|_| "default_operation_id");
+
+        let req_body_def = match match traverser.get_optional(&op_def, REQUEST_BODY_FIELD) {
+            Ok(req_body_def) => req_body_def,
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    &format!(
+                        "Failed to get 'requestBody' in operation '{}'",
+                        operation_id
+                    ),
                 ));
+            }
+        } {
+            None if body.is_some_and(|body| !body.is_null()) => {
+                return Err(ValidationErrorType::assertion_failed(&format!(
+                    "Request body is present, but 'requestBody' is missing from operation '{}'",
+                    operation_id
+                )));
             }
             None => return Ok(()),
             Some(val) => val,
         };
 
-        let is_body_required = traverser.get_optional(req_body_def.value(), REQUIRED_FIELD)?;
+        let is_body_required = match traverser.get_optional(req_body_def.value(), REQUIRED_FIELD) {
+            Ok(is_body_required) => is_body_required,
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    &format!(
+                        "Failed to get 'requestBody' --> 'required' for operation '{}'",
+                        operation_id,
+                    ),
+                ));
+            }
+        };
 
         let is_body_required: bool = match is_body_required {
             None => true,
             Some(val) => val.value().as_bool().unwrap_or(true),
         };
-        if let Some(ctype) = &self.content_type {
-            let content_def = traverser.get_required(req_body_def.value(), CONTENT_FIELD)?;
+        if let Some(content_type) = &self.content_type {
+            let content_def = match traverser.get_required(req_body_def.value(), CONTENT_FIELD) {
+                Ok(content_def) => content_def,
+                Err(e) => {
+                    return Err(ValidationErrorType::traversal_failed(
+                        e,
+                        &format!(
+                            "Failed to get 'requestBody' --> 'content' from operation '{}'",
+                            operation_id
+                        ),
+                    ));
+                }
+            };
 
-            let media_def = traverser.get_required(content_def.value(), &ctype)?;
+            let media_def = match traverser.get_required(content_def.value(), &content_type) {
+                Ok(media_def) => media_def,
+                Err(e) => {
+                    return Err(ValidationErrorType::traversal_failed(
+                        e,
+                        &format!(
+                            "Failed to get 'requestBody' --> 'content' --> '{}' (media-type) from operation '{}'",
+                            content_type, operation_id
+                        ),
+                    ));
+                }
+            };
 
-            let media_schema = traverser.get_required(media_def.value(), SCHEMA_FIELD)?;
+            let media_schema = match traverser.get_required(media_def.value(), SCHEMA_FIELD) {
+                Ok(media_schema) => media_schema,
+                Err(e) => {
+                    return Err(ValidationErrorType::traversal_failed(
+                        e,
+                        &format!(
+                            "Failed to get 'schema' for media-type '{}' from operation '{}'",
+                            content_type, operation_id
+                        ),
+                    ));
+                }
+            };
 
-            Self::check_required_body(traverser, media_schema.value(), body)?;
+            Self::check_required_body(traverser, media_schema.value(), body, &operation_id)?;
+
             if let Some(body_instance) = body {
                 op_path
                     .add(REQUEST_BODY_FIELD)
                     .add(CONTENT_FIELD)
-                    .add(&ctype)
+                    .add(&content_type)
                     .add(SCHEMA_FIELD);
 
-                Self::complex_validation_by_path(
-                    &validation_opts,
-                    &op_path,
-                    body_instance,
-                    self.section.clone(),
-                )?
+                Self::complex_validation_by_path(&validation_opts, &op_path, body_instance)?
 
             // if the body does not exist, make sure 'required' is set to false.
             } else if is_body_required {
-                return Err(ValidationErrorType::SectionExpected(Section::Payload(
-                    PayloadSection::Body,
+                return Err(ValidationErrorType::assertion_failed(&format!(
+                    "Request body is missing, but is required for operation '{}'",
+                    operation_id
                 )));
             }
         } else if is_body_required {
-            return Err(ValidationErrorType::FieldExpected(
-                String::from("Content-Type"),
-                Section::Payload(PayloadSection::Header),
-            ));
+            return Err(ValidationErrorType::assertion_failed(&format!(
+                "Content-Type header is missing, but is required for operation '{}'",
+                operation_id
+            )));
         }
 
         Ok(())
-    }
-
-    fn section(&self) -> &Section {
-        &self.section
     }
 }
