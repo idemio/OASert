@@ -1,4 +1,4 @@
-use crate::error::{OperationSection, Section, SpecificationSection, ValidationErrorType};
+use crate::error::ValidationErrorType;
 use crate::traverser::{OpenApiTraverser, TraverserError};
 use crate::types::primitive::OpenApiPrimitives;
 use crate::types::{Operation, ParameterLocation};
@@ -11,7 +11,6 @@ use std::collections::HashMap;
 pub(crate) struct RequestParameterValidator<'validator> {
     request_instance: &'validator HashMap<String, String>,
     parameter_location: ParameterLocation,
-    section: Section,
 }
 
 impl<'validator> RequestParameterValidator<'validator> {
@@ -25,9 +24,6 @@ impl<'validator> RequestParameterValidator<'validator> {
         Self {
             request_instance,
             parameter_location,
-            section: Section::Specification(SpecificationSection::Paths(
-                OperationSection::Parameters,
-            )),
         }
     }
 }
@@ -41,6 +37,8 @@ impl Validator for RequestParameterValidator<'_> {
         validation_options: &ValidationOptions,
     ) -> Result<(), ValidationErrorType> {
         let op_def = &op.data;
+        let operation_id =
+            OpenApiTraverser::get_as_str(op_def, "operationId").unwrap_or("default_operation_id");
         let param_defs = match match traverser.get_optional(op_def, PARAMETERS_FIELD) {
             Ok(res) => Ok(res),
             Err(e) => match e {
@@ -49,50 +47,122 @@ impl Validator for RequestParameterValidator<'_> {
             },
         } {
             Ok(defs) => defs,
-            Err(_) => todo!(),
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    &format!(
+                        "Failed to get 'parameters' from operation '{}'",
+                        operation_id
+                    ),
+                ));
+            }
         };
 
         match param_defs {
             Some(param_defs) => {
                 let param_defs = match OpenApiTraverser::require_array(param_defs.value()) {
                     Ok(param_defs) => param_defs,
-                    Err(_) => todo!(),
+                    Err(e) => {
+                        return Err(ValidationErrorType::traversal_failed(
+                            e,
+                            &format!(
+                                "Failed to parse 'parameters' as a vector value in {}",
+                                operation_id
+                            ),
+                        ));
+                    }
                 };
 
                 for param_def in param_defs {
                     // Only look at parameters that match the current section.
-                    let loc = match OpenApiTraverser::get_as_str(param_def, IN_FIELD) {
+                    let loc = match traverser.get_required(param_def, IN_FIELD) {
+                        Ok(in_f) => in_f,
+                        Err(e) => {
+                            return Err(ValidationErrorType::traversal_failed(
+                                e,
+                                &format!(
+                                    "Failed to get 'in' in parameter definition in operation '{}'",
+                                    operation_id
+                                ),
+                            ));
+                        }
+                    };
+                    let loc = match OpenApiTraverser::require_str(loc.value()) {
                         Ok(loc) => loc,
-                        Err(_) => todo!(),
+                        Err(e) => {
+                            return Err(ValidationErrorType::traversal_failed(
+                                e,
+                                &format!(
+                                    "Failed to parse 'in' from parameter as a string value in {}",
+                                    operation_id
+                                ),
+                            ));
+                        }
                     };
 
                     if loc.to_lowercase() == self.parameter_location.to_string().to_lowercase() {
                         let param_name = match traverser.get_required(param_def, NAME_FIELD) {
                             Ok(param_name) => param_name,
-                            Err(_) => todo!(),
+                            Err(e) => {
+                                return Err(ValidationErrorType::traversal_failed(
+                                    e,
+                                    &format!(
+                                        "Failed to get 'name' from parameter in operation '{}'",
+                                        operation_id
+                                    ),
+                                ));
+                            }
                         };
 
                         let param_name = match OpenApiTraverser::require_str(param_name.value()) {
                             Ok(param_name) => param_name,
-                            Err(_) => todo!(),
+                            Err(e) => {
+                                return Err(ValidationErrorType::traversal_failed(
+                                    e,
+                                    &format!(
+                                        "Failed to parse 'name' from parameter as a string value in {}",
+                                        operation_id
+                                    ),
+                                ));
+                            }
                         };
 
-                        let is_param_required =
-                            match traverser.get_optional(param_def, REQUIRED_FIELD) {
-                                Ok(is_param_required) => is_param_required,
-                                Err(_) => todo!(),
-                            };
+                        let is_param_required = match traverser
+                            .get_optional(param_def, REQUIRED_FIELD)
+                        {
+                            Ok(is_param_required) => is_param_required,
+                            Err(e) => {
+                                return Err(ValidationErrorType::traversal_failed(
+                                    e,
+                                    &format!(
+                                        "Failed to get 'required' from parameter '{}' in operation '{}'",
+                                        param_name, operation_id
+                                    ),
+                                ));
+                            }
+                        };
 
                         let is_param_required: bool = match is_param_required {
                             None => false,
                             Some(val) => {
-                                OpenApiTraverser::require_bool(val.value()).unwrap_or(false)
+                                OpenApiTraverser::require_bool(val.value()).unwrap_or_else(|_| {
+                                    log::trace!("Request parameter '{}' in operation '{}' does not have 'required' field defined. Using false as default.", param_name, operation_id);
+                                    false
+                                })
                             }
                         };
 
                         let param_schema = match traverser.get_required(param_def, SCHEMA_FIELD) {
                             Ok(param_schema) => param_schema,
-                            Err(_) => todo!(),
+                            Err(e) => {
+                                return Err(ValidationErrorType::traversal_failed(
+                                    e,
+                                    &format!(
+                                        "Failed to get 'schema' from parameter '{}' in operation '{}'",
+                                        param_name, operation_id
+                                    ),
+                                ));
+                            }
                         };
 
                         let param_schema = param_schema.value();
@@ -107,21 +177,19 @@ impl Validator for RequestParameterValidator<'_> {
                                     validation_options,
                                     &param_schema,
                                     &inst,
-                                    self.section.clone(),
                                 )?
                             } else {
                                 Self::complex_validation_by_schema(
                                     validation_options,
                                     &param_schema,
                                     &inst,
-                                    self.section.clone(),
                                 )?
                             }
                         } else if is_param_required {
-                            return Err(ValidationErrorType::FieldExpected(
-                                param_name.to_string(),
-                                self.section.clone(),
-                            ));
+                            return Err(ValidationErrorType::assertion_failed(&format!(
+                                "Parameter '{}' is required but not found in request.",
+                                param_name
+                            )));
                         }
                     }
                 }
@@ -129,10 +197,6 @@ impl Validator for RequestParameterValidator<'_> {
             }
             None => Ok(()),
         }
-    }
-
-    fn section(&self) -> &Section {
-        &self.section
     }
 }
 
@@ -404,6 +468,7 @@ mod test {
             .unwrap();
         let query_params = "limit=10";
         let result = validator.validate_request_query_parameters(&operation, query_params);
+        println!("{:?}", result);
         assert!(result.is_ok());
     }
 }

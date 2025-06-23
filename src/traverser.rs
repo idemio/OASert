@@ -20,7 +20,7 @@ type FindOperationResult<'a> = Result<Arc<Operation>, TraverserError<'a>>;
 ///
 /// This enum represents various error conditions that may arise when parsing,
 /// validating, or navigating through an OpenAPI specification document.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum TraverserError<'a> {
     /// A required field was not found in the specification.
     MissingField(Cow<'a, str>),
@@ -218,7 +218,7 @@ impl OpenApiTraverser {
     ///     }
     /// });
     ///
-    /// let traverser = OpenApiTraverser::new(spec)?;
+    /// let traverser = OpenApiTraverser::new(spec).unwrap();
     /// ```
     ///
     /// # Behavior
@@ -231,10 +231,12 @@ impl OpenApiTraverser {
             resolved_operations: DashMap::new(),
             path_router: PathNode::new(),
         };
-        match traverser.crawl_paths() {
-            Ok(_) => {}
-            Err(_) => todo!(),
-        };
+
+        if let Err(_) = traverser.crawl_paths() {
+            return Err(TraverserError::invalid_structure(
+                "Failed to build router paths from provided specification.",
+            ));
+        }
         Ok(traverser)
     }
 
@@ -412,8 +414,8 @@ impl OpenApiTraverser {
     ///         }
     ///     }
     /// });
-    /// let traverser = OpenApiTraverser::new(spec)?;
-    /// let operation = traverser.get_operation_from_path_and_method("/users/123", "GET")?;
+    /// let traverser = OpenApiTraverser::new(spec).unwrap();
+    /// let operation = traverser.get_operation_from_path_and_method("/users/123", "GET").unwrap();
     /// println!("Found operation: {:?}", operation);
     /// ```
     ///
@@ -511,16 +513,37 @@ impl OpenApiTraverser {
     ///
     /// # Examples
     /// ```rust
+    /// use serde_json::json;
     /// use oasert::traverser::OpenApiTraverser;
     ///
-    /// let spec = serde_json::json!({});
+    /// let spec = json!({
+    ///     "openapi": "3.0.0",
+    ///     "info": {"title": "API", "version": "1.0.0"},
+    ///     "paths": {
+    ///         "/users/{id}": {
+    ///             "get": {
+    ///                 "summary": "Get user by ID",
+    ///                 "parameters": [
+    ///                     {
+    ///                         "name": "id",
+    ///                         "in": "path",
+    ///                         "required": true,
+    ///                         "schema": {
+    ///                             "type": "integer"
+    ///                         }
+    ///                     }
+    ///                 ]
+    ///             }
+    ///         }
+    ///     }
+    /// });
     ///
-    /// let traverser = OpenApiTraverser::new(spec)?;
-    /// let node = &serde_json::json!({"optional_field": "value"});
-    /// let result = traverser.get_optional(node, "optional_field")?;
+    /// let traverser = OpenApiTraverser::new(spec).unwrap();
+    /// let node = &json!({"optional_field": "value"});
+    /// let result = traverser.get_optional(node, "optional_field").unwrap();
     /// assert!(result.is_some());
     ///
-    /// let missing = traverser.get_optional(node, "missing_field")?;
+    /// let missing = traverser.get_optional(node, "missing_field").unwrap();
     /// assert!(missing.is_none());
     /// ```
     ///
@@ -552,11 +575,32 @@ impl OpenApiTraverser {
     ///
     /// # Examples
     /// ```rust
+    /// use serde_json::json;
     /// use oasert::traverser::OpenApiTraverser;
-    /// let spec = serde_json::json!({});
-    /// let traverser = OpenApiTraverser::new(spec)?;
-    /// let node = &serde_json::json!({"required_field": "value"});
-    /// let result = traverser.get_required(node, "required_field")?;
+    /// let spec = json!({
+    ///     "openapi": "3.0.0",
+    ///     "info": {"title": "API", "version": "1.0.0"},
+    ///     "paths": {
+    ///         "/users/{id}": {
+    ///             "get": {
+    ///                 "summary": "Get user by ID",
+    ///                 "parameters": [
+    ///                     {
+    ///                         "name": "id",
+    ///                         "in": "path",
+    ///                         "required": true,
+    ///                         "schema": {
+    ///                             "type": "integer"
+    ///                         }
+    ///                     }
+    ///                 ]
+    ///             }
+    ///         }
+    ///     }
+    /// });
+    /// let traverser = OpenApiTraverser::new(spec).unwrap();
+    /// let node = &json!({"required_field": "value"});
+    /// let result = traverser.get_required(node, "required_field").unwrap();
     /// assert_eq!(result.value().as_str().unwrap(), "value");
     /// ```
     ///

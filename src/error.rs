@@ -1,4 +1,7 @@
+use crate::traverser::TraverserError;
 use crate::types::primitive::OpenApiPrimitives;
+use crate::types::version::VersionError;
+use jsonschema::{ReferencingError, ValidationError as JsonSchemaValidationError};
 use serde_json::Value;
 use std::fmt::{Display, Formatter};
 
@@ -101,11 +104,15 @@ impl Display for OperationSection {
 
 #[derive(Debug)]
 pub enum ValidationErrorType {
-    UnsupportedSpecVersion(String, Section),
-    SchemaValidationFailed(String, Section),
+    SchemaValidationFailed(String, String),
+    TraversalFailed(String, String),
+    AssertionFailed(String),
+    LoadingResourceFailed(String, String),
+    VersionFailed(String, String),
     ValueExpected(String, Section),
     SectionExpected(Section),
     FieldExpected(String, Section),
+
     UnexpectedType {
         expected: OpenApiPrimitives,
         found: Value,
@@ -116,11 +123,69 @@ pub enum ValidationErrorType {
     InvalidRef(String, Section),
 }
 
+impl ValidationErrorType {
+    pub(crate) fn traversal_failed<T>(traversal_error: TraverserError, message: &T) -> Self
+    where
+        T: ToString + ?Sized,
+    {
+        ValidationErrorType::TraversalFailed(traversal_error.to_string(), message.to_string())
+    }
+
+    pub(crate) fn schema_validation_failed<T>(
+        json_schema_error: JsonSchemaValidationError,
+        message: &T,
+    ) -> Self
+    where
+        T: ToString + ?Sized,
+    {
+        ValidationErrorType::SchemaValidationFailed(
+            json_schema_error.to_string(),
+            message.to_string(),
+        )
+    }
+
+    pub(crate) fn resource_load_error<T>(error: ReferencingError, message: &T) -> Self
+    where
+        T: ToString + ?Sized,
+    {
+        ValidationErrorType::LoadingResourceFailed(error.to_string(), message.to_string())
+    }
+
+    pub(crate) fn assertion_failed<T>(message: &T) -> Self
+    where
+        T: ToString + ?Sized,
+    {
+        ValidationErrorType::AssertionFailed(message.to_string())
+    }
+
+    pub(crate) fn version_failed<T>(version_error: VersionError, message: &T) -> Self
+    where
+        T: ToString + ?Sized,
+    {
+        ValidationErrorType::VersionFailed(version_error.to_string(), message.to_string())
+    }
+}
+
 impl Display for ValidationErrorType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationErrorType::SchemaValidationFailed(msg, section) => {
-                write!(f, "Schema validation failed {} in {}", msg, section)
+            ValidationErrorType::LoadingResourceFailed(resource_error, msg) => {
+                write!(
+                    f,
+                    "Loading resource failed for {} with error: {}",
+                    resource_error, msg
+                )
+            }
+            ValidationErrorType::AssertionFailed(msg) => write!(f, "Assertion failed: {}", msg),
+            ValidationErrorType::TraversalFailed(msg, operation_id) => {
+                write!(
+                    f,
+                    "Traversal failed for operation {} with error: {}",
+                    operation_id, msg
+                )
+            }
+            ValidationErrorType::SchemaValidationFailed(validation_error, msg) => {
+                write!(f, "Schema Validation Failed: {} {}", msg, validation_error)
             }
             ValidationErrorType::SectionExpected(section) => {
                 write!(f, "Section {} expected", section)
@@ -131,8 +196,8 @@ impl Display for ValidationErrorType {
             ValidationErrorType::ValueExpected(msg, section) => {
                 write!(f, "Value expected {} in {}", msg, section)
             }
-            ValidationErrorType::UnsupportedSpecVersion(msg, section) => {
-                write!(f, "Unsupported spec version {} in {}", msg, section)
+            ValidationErrorType::VersionFailed(version_error, msg) => {
+                write!(f, "Version Failed: {} {}", msg, version_error)
             }
             ValidationErrorType::UnableToParse(msg, section) => {
                 write!(f, "Unable to parse {} in {}", msg, section)
@@ -186,8 +251,8 @@ impl PartialEq for ValidationErrorType {
             ) => true,
             (ValidationErrorType::InvalidRef(_, _), ValidationErrorType::InvalidRef(_, _)) => true,
             (
-                ValidationErrorType::UnsupportedSpecVersion(_, _),
-                ValidationErrorType::UnsupportedSpecVersion(_, _),
+                ValidationErrorType::VersionFailed(_, _),
+                ValidationErrorType::VersionFailed(_, _),
             ) => true,
             (_, _) => false,
         }

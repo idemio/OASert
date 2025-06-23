@@ -1,6 +1,4 @@
-use crate::error::{
-    OperationSection, PayloadSection, Section, SpecificationSection, ValidationErrorType,
-};
+use crate::error::ValidationErrorType;
 use crate::traverser::OpenApiTraverser;
 use crate::types::Operation;
 use crate::validator::Validator;
@@ -11,7 +9,6 @@ use std::collections::HashSet;
 
 pub(crate) struct RequestScopeValidator<'validator> {
     request_instance: &'validator Vec<String>,
-    section: Section,
 }
 
 impl<'validator> RequestScopeValidator<'validator> {
@@ -19,22 +16,25 @@ impl<'validator> RequestScopeValidator<'validator> {
     where
         'node: 'validator,
     {
-        Self {
-            request_instance,
-            section: Section::Specification(SpecificationSection::Paths(
-                OperationSection::Security,
-            )),
-        }
+        Self { request_instance }
     }
 
     fn validate_scopes_using_schema(
         security_definitions: &Value,
         request_scopes: &HashSet<&str>,
+        operation_id: &str,
     ) -> Result<(), ValidationErrorType> {
-        // get the array of maps
         let security_defs = match OpenApiTraverser::require_array(security_definitions) {
             Ok(security_defs) => security_defs,
-            Err(_) => todo!(),
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    &format!(
+                        "Failed to parse security definitions as a vector in operation '{}'",
+                        operation_id
+                    ),
+                ));
+            }
         };
 
         if security_defs.is_empty() {
@@ -43,26 +43,46 @@ impl<'validator> RequestScopeValidator<'validator> {
         }
 
         for security_definition in security_defs {
-            // convert to map
             let security_def = match OpenApiTraverser::require_object(security_definition) {
                 Ok(security_def) => security_def,
-                Err(_) => todo!(),
+                Err(e) => {
+                    return Err(ValidationErrorType::traversal_failed(
+                        e,
+                        &format!(
+                            "Failed to parse security definition as a map in operation '{}'",
+                            operation_id
+                        ),
+                    ));
+                }
             };
 
             for (schema_name, scope_list) in security_def {
-                // convert to list
                 let scope_list = match OpenApiTraverser::require_array(scope_list) {
                     Ok(scope_list) => scope_list,
-                    Err(_) => todo!(),
+                    Err(e) => {
+                        return Err(ValidationErrorType::traversal_failed(
+                            e,
+                            &format!(
+                                "Failed to parse scope list as a list in operation '{}'",
+                                operation_id
+                            ),
+                        ));
+                    }
                 };
 
                 let mut scopes_match_schema = true;
-
-                // check to see if the scope is found in our request scopes
                 'scope_match: for scope in scope_list {
                     let scope = match OpenApiTraverser::require_str(scope) {
                         Ok(scope) => scope,
-                        Err(_) => todo!(),
+                        Err(e) => {
+                            return Err(ValidationErrorType::traversal_failed(
+                                e,
+                                &format!(
+                                    "Failed to parse scope as a string in operation '{}'",
+                                    operation_id
+                                ),
+                            ));
+                        }
                     };
                     if !request_scopes.contains(scope) {
                         scopes_match_schema = false;
@@ -76,14 +96,15 @@ impl<'validator> RequestScopeValidator<'validator> {
                 }
             }
         }
-        Err(ValidationErrorType::FieldExpected(
+        Err(ValidationErrorType::assertion_failed(&format!(
+            "Request scopes {} did not match any security definition in operation '{}'",
             request_scopes
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<String>>()
                 .join(", "),
-            Section::Payload(PayloadSection::Other),
-        ))
+            operation_id
+        )))
     }
 }
 
@@ -95,31 +116,47 @@ impl Validator for RequestScopeValidator<'_> {
         _validation_options: &ValidationOptions,
     ) -> Result<(), ValidationErrorType> {
         let op = &op.data;
+        let operation_id = OpenApiTraverser::get_as_str(&op, "operationId")
+            .unwrap_or_else(|_| "default_operation_id");
 
         let scopes: HashSet<&str> = self.request_instance.iter().map(|s| s.as_str()).collect();
         let security_defs = match traverser.get_optional(op, SECURITY_FIELD) {
             Ok(security_defs) => security_defs,
-            Err(_) => todo!(),
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    &format!("Failed to get 'security' from operation '{}'", operation_id),
+                ));
+            }
         };
 
         if let Some(security_defs) = security_defs {
-            return Self::validate_scopes_using_schema(security_defs.value(), &scopes);
+            return Self::validate_scopes_using_schema(
+                security_defs.value(),
+                &scopes,
+                &operation_id,
+            );
         }
 
         let global_security_defs =
             match traverser.get_optional(traverser.specification(), SECURITY_FIELD) {
                 Ok(global_security_defs) => global_security_defs,
-                Err(_) => todo!(),
+                Err(e) => {
+                    return Err(ValidationErrorType::traversal_failed(
+                        e,
+                        "Failed to get global 'security' from specification",
+                    ));
+                }
             };
 
         if let Some(security_definitions) = global_security_defs {
-            return Self::validate_scopes_using_schema(security_definitions.value(), &scopes);
+            return Self::validate_scopes_using_schema(
+                security_definitions.value(),
+                &scopes,
+                &operation_id,
+            );
         }
         Ok(())
-    }
-
-    fn section(&self) -> &Section {
-        &self.section
     }
 }
 

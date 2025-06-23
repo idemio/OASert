@@ -1,4 +1,3 @@
-use crate::error::{Section, SpecificationSection, ValidationErrorType};
 use jsonschema::Draft;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -9,7 +8,7 @@ pub enum OpenApiVersion {
 }
 
 impl FromStr for OpenApiVersion {
-    type Err = ValidationErrorType;
+    type Err = VersionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with("3.1") {
@@ -17,10 +16,7 @@ impl FromStr for OpenApiVersion {
         } else if s.starts_with("3.0") {
             Ok(OpenApiVersion::V30x)
         } else {
-            Err(ValidationErrorType::UnsupportedSpecVersion(
-                s.to_string(),
-                Section::Specification(SpecificationSection::Other),
-            ))
+            Err(VersionError::unsupported_version(s))
         }
     }
 }
@@ -35,17 +31,22 @@ impl OpenApiVersion {
 }
 
 #[derive(Debug)]
-pub(crate) enum VersionError<'a> {
-    UnknownVersion(&'a str),
-    UnsupportedVersion(&'a str),
+pub enum VersionError {
+    UnsupportedVersion(String),
 }
 
-impl Display for VersionError<'_> {
+impl VersionError {
+    pub(crate) fn unsupported_version<T>(version: &T) -> Self
+    where
+        T: ToString + ?Sized,
+    {
+        VersionError::UnsupportedVersion(version.to_string())
+    }
+}
+
+impl Display for VersionError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            VersionError::UnknownVersion(version) => {
-                write!(f, "Unknown version: {}", version)
-            }
             VersionError::UnsupportedVersion(version) => {
                 write!(f, "Unsupported version: {}", version)
             }
@@ -53,4 +54,4 @@ impl Display for VersionError<'_> {
     }
 }
 
-impl std::error::Error for VersionError<'_> {}
+impl std::error::Error for VersionError {}

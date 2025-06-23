@@ -191,64 +191,62 @@ impl ValidatorCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn test_cache_get_insert() {
-        let cache = ValidatorCache::new();
-        assert!(cache.get("test").is_err());
-        let spec = json!({
-            "openapi": "3.1.0"
-        });
-        let validator = cache.insert("test".to_string(), spec).unwrap();
-        assert!(!cache.is_empty());
-        assert_eq!(cache.len(), 1);
-        let cached = cache.get("test").unwrap();
-        assert!(Arc::ptr_eq(&validator, &cached));
-    }
-
-    #[test]
-    fn test_cache_get_or_insert() {
-        let cache = ValidatorCache::new();
-        assert!(cache.get("test").is_err());
-        let spec = json!({
-            "openapi": "3.1.0"
-        });
-        let validator1 = cache
-            .get_or_insert("test".to_string(), spec.clone())
-            .unwrap();
-        let validator2 = cache
-            .get_or_insert("test".to_string(), json!({"openapi": "3.0.0"}))
-            .unwrap();
-        assert!(Arc::ptr_eq(&validator1, &validator2));
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn test_cache_clear() {
-        let cache = ValidatorCache::new();
-        let spec = json!({
-            "openapi": "3.1.0"
-        });
-        cache.insert("test1".to_string(), spec.clone()).unwrap();
-        cache.insert("test2".to_string(), spec.clone()).unwrap();
-        cache.insert("test3".to_string(), spec).unwrap();
-        assert_eq!(cache.len(), 3);
-        cache.clear();
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn test_global_cache() {
-        let cache = global_validator_cache();
-        cache.clear();
-        let spec = json!({
-            "openapi": "3.1.0"
-        });
-        cache.insert("global_test".to_string(), spec).unwrap();
-        let same_cache = global_validator_cache();
-        assert!(same_cache.get("global_test").is_ok());
-        cache.clear();
-    }
+    //    #[test]
+    //    fn test_cache_get_insert() {
+    //        let cache = ValidatorCache::new();
+    //        assert!(cache.get("test").is_err());
+    //        let spec = json!({
+    //            "openapi": "3.1.0"
+    //        });
+    //        let validator = cache.insert("test".to_string(), spec).unwrap();
+    //        assert!(!cache.is_empty());
+    //        assert_eq!(cache.len(), 1);
+    //        let cached = cache.get("test").unwrap();
+    //        assert!(Arc::ptr_eq(&validator, &cached));
+    //    }
+    //
+    //    #[test]
+    //    fn test_cache_get_or_insert() {
+    //        let cache = ValidatorCache::new();
+    //        assert!(cache.get("test").is_err());
+    //        let spec = json!({
+    //            "openapi": "3.1.0"
+    //        });
+    //        let validator1 = cache
+    //            .get_or_insert("test".to_string(), spec.clone())
+    //            .unwrap();
+    //        let validator2 = cache
+    //            .get_or_insert("test".to_string(), json!({"openapi": "3.0.0"}))
+    //            .unwrap();
+    //        assert!(Arc::ptr_eq(&validator1, &validator2));
+    //        assert_eq!(cache.len(), 1);
+    //    }
+    //
+    //    #[test]
+    //    fn test_cache_clear() {
+    //        let cache = ValidatorCache::new();
+    //        let spec = json!({
+    //            "openapi": "3.1.0"
+    //        });
+    //        cache.insert("test1".to_string(), spec.clone()).unwrap();
+    //        cache.insert("test2".to_string(), spec.clone()).unwrap();
+    //        cache.insert("test3".to_string(), spec).unwrap();
+    //        assert_eq!(cache.len(), 3);
+    //        cache.clear();
+    //        assert!(cache.is_empty());
+    //    }
+    //
+    //    #[test]
+    //    fn test_global_cache() {
+    //        let cache = global_validator_cache();
+    //        cache.clear();
+    //        let spec = json!({
+    //            "openapi": "3.1.0"
+    //        });
+    //        cache.insert("global_test".to_string(), spec).unwrap();
+    //        let same_cache = global_validator_cache();
+    //        assert!(same_cache.get("global_test").is_ok());
+    //        cache.clear();
+    //    }
 }

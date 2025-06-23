@@ -49,11 +49,11 @@ impl FromStr for OpenApiPrimitives {
 
 impl OpenApiPrimitives {
     pub fn get_type_from_serde(schema: &Value) -> Option<OpenApiPrimitives> {
-        if schema.as_str().is_some() {
+        if schema.is_string() {
             return Some(OpenApiPrimitives::String);
-        } else if schema.as_array().is_some() {
+        } else if schema.is_array() {
             return Some(OpenApiPrimitives::Array);
-        } else if schema.as_object().is_some() {
+        } else if schema.is_object() {
             return Some(OpenApiPrimitives::Object);
         } else if schema.is_null() {
             return Some(OpenApiPrimitives::Null);

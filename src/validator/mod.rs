@@ -2,7 +2,7 @@ mod request_body;
 mod request_parameter;
 mod scope;
 
-use crate::error::{OperationSection, Section, SpecificationSection, ValidationErrorType};
+use crate::error::ValidationErrorType;
 use crate::traverser::OpenApiTraverser;
 use crate::types::json_path::JsonPath;
 use crate::types::version::OpenApiVersion;
@@ -10,7 +10,7 @@ use crate::types::{HttpLike, Operation, ParameterLocation};
 use crate::validator::request_body::RequestBodyValidator;
 use crate::validator::request_parameter::RequestParameterValidator;
 use crate::validator::scope::RequestScopeValidator;
-use crate::{OPENAPI_FIELD, PATHS_FIELD, REF_FIELD};
+use crate::{OPENAPI_FIELD, REF_FIELD};
 use http::HeaderMap;
 use jsonschema::{Resource, ValidationOptions, Validator as JsonValidator};
 use serde_json::{json, Value};
@@ -27,27 +27,33 @@ impl OpenApiPayloadValidator {
     pub fn new(mut value: Value) -> Result<Self, ValidationErrorType> {
         // Assign ID for schema validation in the future.
         value["$id"] = json!("@@root");
-
-        // Find the version defined in the spec and get the corresponding draft for validation.
-        let version = match value.get(OPENAPI_FIELD).and_then(|v| v.as_str()) {
-            None => {
-                return Err(ValidationErrorType::FieldExpected(
-                    OPENAPI_FIELD.to_string(),
-                    Section::Specification(SpecificationSection::Other),
+        let version = match OpenApiTraverser::get_as_str(&value, OPENAPI_FIELD) {
+            Ok(version) => version,
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    "Failed to get 'openapi' from provided specification.",
                 ));
             }
-            Some(v) => v,
         };
-        let version = OpenApiVersion::from_str(version)?;
+        let version = match OpenApiVersion::from_str(version) {
+            Ok(version) => version,
+            Err(e) => {
+                return Err(ValidationErrorType::version_failed(
+                    e,
+                    "Failed to parse version from provided specification.",
+                ));
+            }
+        };
         let draft = version.get_draft();
 
         // Create this resource once and re-use it for multiple validation calls.
         let resource = match Resource::from_contents(value.clone()) {
             Ok(res) => res,
             Err(e) => {
-                return Err(ValidationErrorType::SchemaValidationFailed(
-                    e.to_string(),
-                    Section::Specification(SpecificationSection::Other),
+                return Err(ValidationErrorType::resource_load_error(
+                    e,
+                    "Failed to create resource from provided specification",
                 ));
             }
         };
@@ -60,10 +66,10 @@ impl OpenApiPayloadValidator {
         // Create the traverser with owned value
         let traverser = match OpenApiTraverser::new(value) {
             Ok(traverser) => traverser,
-            Err(_) => {
-                return Err(ValidationErrorType::FieldExpected(
-                    PATHS_FIELD.to_string(),
-                    Section::Specification(SpecificationSection::Paths(OperationSection::Other)),
+            Err(e) => {
+                return Err(ValidationErrorType::traversal_failed(
+                    e,
+                    "Failed to create traverser from provided specification.",
                 ));
             }
         };
@@ -180,7 +186,7 @@ impl OpenApiPayloadValidator {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - If the request body is valid according to the OpenAPI specification
+    /// * `Ok(())` - If the request body is valid, according to the OpenAPI specification
     /// * `Err(ValidationErrorType)` - If validation fails, with specific error details:
     ///   - `SectionExpected` - If the request has a body but the operation doesn't define a request body
     ///   - `FieldExpected` - If a required Content-Type header is missing
@@ -273,7 +279,7 @@ impl OpenApiPayloadValidator {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - If the request is valid according to the OpenAPI specification
+    /// * `Ok(())` - If the request is valid, according to the OpenAPI specification
     /// * `Err(ValidationErrorType)` - If any validation fails, with details about the failure
     pub fn validate_request<T>(
         &self,
@@ -557,8 +563,6 @@ pub(crate) trait Validator {
         validation_options: &ValidationOptions,
     ) -> Result<(), ValidationErrorType>;
 
-    fn section(&self) -> &Section;
-
     /// Validates a JSON instance against a schema referenced by a JSON path.
     ///
     /// # Arguments
@@ -574,14 +578,13 @@ pub(crate) trait Validator {
         options: &ValidationOptions,
         json_path: &JsonPath,
         instance: &Value,
-        section: Section,
     ) -> Result<(), ValidationErrorType> {
         let full_pointer_path = format!("@@root#/{}", json_path.format_path());
         let schema = json!({
             REF_FIELD: full_pointer_path
         });
         let validator = Self::build_validator(options, &schema)?;
-        Self::do_validate(&validator, instance, section)
+        Self::do_validate(&validator, instance)
     }
 
     /// Validates a JSON instance against a JSON schema.
@@ -604,10 +607,9 @@ pub(crate) trait Validator {
         options: &ValidationOptions,
         schema: &Value,
         instance: &Value,
-        section: Section,
     ) -> Result<(), ValidationErrorType> {
         let validator = Self::build_validator(options, schema)?;
-        Self::do_validate(&validator, instance, section)
+        Self::do_validate(&validator, instance)
     }
 
     /// Validates a JSON instance against a JSON Schema validator.
@@ -623,13 +625,12 @@ pub(crate) trait Validator {
     fn do_validate(
         validator: &jsonschema::Validator,
         instance: &Value,
-        section: Section,
     ) -> Result<(), ValidationErrorType> {
         match validator.validate(instance) {
             Ok(_) => Ok(()),
-            Err(e) => Err(ValidationErrorType::SchemaValidationFailed(
-                e.to_string(),
-                section,
+            Err(e) => Err(ValidationErrorType::schema_validation_failed(
+                e,
+                &format!("Instance {} failed validation", instance.to_string()),
             )),
         }
     }
@@ -652,9 +653,12 @@ pub(crate) trait Validator {
         let validator = match validation_options.build(&schema) {
             Ok(val) => val,
             Err(e) => {
-                return Err(ValidationErrorType::SchemaValidationFailed(
-                    e.to_string(),
-                    Section::Specification(SpecificationSection::Other),
+                return Err(ValidationErrorType::schema_validation_failed(
+                    e,
+                    &format!(
+                        "Failed to build validator for schema {}",
+                        schema.to_string()
+                    ),
                 ));
             }
         };

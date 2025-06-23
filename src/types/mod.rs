@@ -6,7 +6,6 @@ use crate::types::json_path::JsonPath;
 use http::{HeaderMap, Method};
 use serde_json::Value;
 use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct Operation {
