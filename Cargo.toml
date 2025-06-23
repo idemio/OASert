@@ -1,6 +1,6 @@
 [package]
 name = "oasert"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Kalev Gonvick kalev.gonvick@idemio.dev"]
 edition = "2024"
 repository = "https://github.com/idemio/OASert"
