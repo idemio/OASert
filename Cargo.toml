@@ -40,4 +40,8 @@ path = "examples/hyper-validation/main.rs"
 name = "aws-lambda-http-validation"
 path = "examples/aws-lambda-http-validation/main.rs"
 
+[[example]]
+name = "hyper-gateway-example"
+path = "examples/hyper-gateway-example/main.rs"
+
 

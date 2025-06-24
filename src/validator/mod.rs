@@ -24,8 +24,10 @@ pub struct OpenApiPayloadValidator {
 }
 
 impl OpenApiPayloadValidator {
-    pub fn new(mut value: Value) -> Result<Self, ValidationErrorType> {
+    pub fn new(value: Value) -> Result<Self, ValidationErrorType> {
+        let mut value = value;
         // Assign ID for schema validation in the future.
+        println!("{:?}", value);
         value["$id"] = json!("@@root");
         let version = match OpenApiTraverser::get_as_str(&value, OPENAPI_FIELD) {
             Ok(version) => version,
@@ -246,8 +248,8 @@ impl OpenApiPayloadValidator {
     where
         T: serde::ser::Serialize,
     {
-        let content_type = Self::extract_content_type(&request.headers());
-        let body_instance = request.body();
+        let content_type = Self::extract_content_type(&request.headers_ref());
+        let body_instance = request.converted_body();
         match serde_json::to_value(body_instance) {
             Ok(body) => {
                 let validator = RequestBodyValidator::new(Some(&body), content_type);
@@ -289,11 +291,11 @@ impl OpenApiPayloadValidator {
     where
         T: serde::ser::Serialize,
     {
-        let operation = self.find_operation(request.path(), request.method().as_str())?;
+        let operation = self.find_operation(request.path_ref(), request.method_ref().as_str())?;
         self.validate_request_body(&operation, request)?;
-        self.validate_request_header_params(&operation, request.headers())?;
+        self.validate_request_header_params(&operation, request.headers_ref())?;
 
-        if let Some(query_params) = request.query() {
+        if let Some(query_params) = request.query_ref() {
             self.validate_request_query_parameters(&operation, query_params)?;
         }
 
@@ -303,7 +305,6 @@ impl OpenApiPayloadValidator {
 
         Ok(())
     }
-
     /// # validate_request_header_params
     ///
     /// Validates HTTP request headers against OpenAPI operation specification parameters.
