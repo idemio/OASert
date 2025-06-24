@@ -1,13 +1,32 @@
 use lambda_http::{service_fn, Body, Error, IntoResponse, RequestExt};
+use oasert::cache::global_validator_cache;
 use oasert::validator::OpenApiPayloadValidator;
+use serde_json::Value;
 use std::sync::Arc;
+
+const VALIDATOR_CACHE_ID: &'static str = "MY_VALIDATOR";
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let openapi_file =
-        std::fs::read_to_string("examples/aws-lambda-http-validation/openapi-v3.1.0.json").unwrap();
-    let openapi_value: serde_json::Value = serde_json::from_str(&openapi_file).unwrap();
-    let validator = Arc::new(OpenApiPayloadValidator::new(openapi_value).unwrap());
+    let validator_id = VALIDATOR_CACHE_ID.to_string();
+    let validator: Arc<OpenApiPayloadValidator> =
+        if global_validator_cache().contains(&validator_id) {
+            match global_validator_cache().get(&validator_id) {
+                Ok(validator) => validator,
+                Err(_) => panic!("Cache error occurred!"),
+            }
+        } else {
+            let openapi_file =
+                std::fs::read_to_string("examples/aws-lambda-http-validation/openapi-v3.1.0.json")
+                    .unwrap();
+            let openapi_value: Value = serde_json::from_str(&openapi_file).unwrap();
+
+            match global_validator_cache().insert(validator_id, openapi_value) {
+                Ok(validator) => validator,
+                Err(_) => panic!("Cache error occurred!"),
+            }
+        };
+
     lambda_http::run(service_fn(|req| {
         validation_function(validator.clone(), req)
     }))

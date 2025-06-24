@@ -37,37 +37,42 @@ pub trait HttpLike<T>
 where
     T: serde::ser::Serialize,
 {
-    fn method(&self) -> &Method;
-    fn path(&self) -> &str;
-    fn headers(&self) -> &HeaderMap;
-    fn body(&self) -> Option<Value>;
-    fn query(&self) -> Option<&str>;
+    fn method_ref(&self) -> &Method;
+    fn path_ref(&self) -> &str;
+    fn headers_ref(&self) -> &HeaderMap;
+    fn body_ref(&self) -> &T;
+    fn converted_body(&self) -> Option<Value>;
+    fn query_ref(&self) -> Option<&str>;
 }
 
 impl<T> HttpLike<T> for http::Request<T>
 where
     T: serde::ser::Serialize,
 {
-    fn method(&self) -> &Method {
+    fn method_ref(&self) -> &Method {
         &self.method()
     }
 
-    fn path(&self) -> &str {
+    fn path_ref(&self) -> &str {
         &self.uri().path()
     }
 
-    fn headers(&self) -> &HeaderMap {
+    fn headers_ref(&self) -> &HeaderMap {
         &self.headers()
     }
 
-    fn body(&self) -> Option<Value> {
+    fn body_ref(&self) -> &T {
+        &self.body()
+    }
+
+    fn converted_body(&self) -> Option<Value> {
         match serde_json::to_value(self.body()) {
             Ok(val) => Some(val),
             Err(_) => None,
         }
     }
 
-    fn query(&self) -> Option<&str> {
+    fn query_ref(&self) -> Option<&str> {
         match &self.uri().query() {
             None => None,
             Some(x) => Some(x),
