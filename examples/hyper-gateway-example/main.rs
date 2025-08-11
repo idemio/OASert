@@ -11,8 +11,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
-type ResponseBody = BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
-
 // Helper function to create error responses - now uses the same error type
 fn error_response(status: u16, message: &str) -> Response<BoxBody<Bytes, Infallible>> {
     let body = Full::new(Bytes::from(message.to_string()))
@@ -33,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Insert api 1 into the validator cache
     let spec1_path = "examples/hyper-gateway-example/api1-v3.1.0.json";
     let spec1_prefix = "/api1";
-    match validator_cache.insert_from_file_path(spec1_prefix.to_string(), spec1_path.to_string()) {
+    match validator_cache.insert_from_file_path(spec1_prefix.to_string(), &spec1_path) {
         Ok(x) => x,
         Err(_) => panic!("Failed to insert spec1 into validator cache"),
     };
@@ -41,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Insert api2 into the validator cache
     let spec2_path = "examples/hyper-gateway-example/api2-v3.1.0.json";
     let spec2_prefix = "/api2";
-    match validator_cache.insert_from_file_path(spec2_prefix.to_string(), spec2_path.to_string()) {
+    match validator_cache.insert_from_file_path(spec2_prefix.to_string(), &spec2_path) {
         Ok(x) => x,
         Err(_) => panic!("Failed to insert spec2 into validator cache"),
     };
@@ -115,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let mut req = http::Request::from_parts(parts, string_body);
+                let req = http::Request::from_parts(parts, string_body);
 
                 // Validation logic
                 if req.uri().path().starts_with(spec1_prefix) {

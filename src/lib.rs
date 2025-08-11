@@ -1,8 +1,10 @@
 pub mod cache;
+mod converter;
 pub(crate) mod error;
 pub mod traverser;
 pub mod types;
 pub mod validator;
+
 const CONTENT_FIELD: &'static str = "content";
 const SCHEMA_FIELD: &'static str = "schema";
 const REQUEST_BODY_FIELD: &'static str = "requestBody";

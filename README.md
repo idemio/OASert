@@ -23,7 +23,13 @@ ensure strict compliance with defined API contracts during request processing.
   Detailed error reporting with specific categories like missing properties, invalid types, or unsupported schema versions.
 
 - **Supports OpenAPI Drafts**  
-  Includes support for both OpenAPI 3.0.x (Draft 4) and OpenAPI 3.1.x (Draft 2020-12).
+  Includes support for both OpenAPI 3.0.x (Draft 4) and OpenAPI 3.1.x (Draft 2020–12).
+
+- **Supports Partial Validation**
+  Allows for partial validation of requests (i.e. validate headers, validate scopes, validate body, etc.)
+
+- **Runtime Agnostic**
+  Does not depend on any specific runtime and can be dropped in where needed (i.e., hyper, aws lambda, etc.)
 
 ---
 

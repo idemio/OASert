@@ -70,8 +70,6 @@ impl Service<Request<Incoming>> for TestHyperService {
                 Ok(bytes) => bytes,
                 Err(_) => panic!("Error reading body data"),
             };
-
-            // Parse string as JSON
             let json_value: serde_json::Value =
                 serde_json::from_slice(&bytes.to_bytes()).expect("Body was not valid JSON");
 
