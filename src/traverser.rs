@@ -1,53 +1,49 @@
 use crate::types::json_path::JsonPath;
+use crate::types::operation::Operation;
 use crate::types::primitive::OpenApiPrimitives;
-use crate::types::Operation;
 use crate::{NAME_FIELD, PARAMETERS_FIELD, PATHS_FIELD, PATH_SEPARATOR, REF_FIELD, SCHEMA_FIELD};
 use dashmap::{DashMap, Entry};
 use serde_json::{Map, Value};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::sync::Arc;
 
-type TraverseSearchResult<'a> = Result<SearchResult<'a>, TraverserError<'a>>;
-type TraverseOptionalSearchResult<'a> = Result<Option<SearchResult<'a>>, TraverserError<'a>>;
-type TraverseTypeResult<'a, T> = Result<&'a T, TraverserError<'a>>;
-type TraverseResult<'a> = Result<(), TraverserError<'a>>;
-type FindOperationResult<'a> = Result<Arc<Operation>, TraverserError<'a>>;
+type TraverseSearchResult<'a> = Result<SearchResult<'a>, TraverserError>;
+type TraverseOptionalSearchResult<'a> = Result<Option<SearchResult<'a>>, TraverserError>;
+type TraverseTypeResult<'a, T> = Result<&'a T, TraverserError>;
+type TraverseResult<'a> = Result<(), TraverserError>;
+type FindOperationResult<'a> = Result<Arc<Operation>, TraverserError>;
 
 /// Error types that can occur during OpenAPI specification traversal.
 ///
 /// This enum represents various error conditions that may arise when parsing,
 /// validating, or navigating through an OpenAPI specification document.
 #[derive(Debug, PartialEq)]
-pub enum TraverserError<'a> {
+pub enum TraverserError {
     /// A required field was not found in the specification.
-    MissingField(Cow<'a, str>),
+    MissingField(String),
 
     /// The found type does not match the expected type.
-    TypeMismatch {
-        expected: Cow<'a, str>,
-        found: Cow<'a, str>,
-    },
+    TypeMismatch { expected: String, found: String },
 
     /// The structure of the specification is invalid or contains logical errors.
-    InvalidStructure(Cow<'a, str>),
+    InvalidStructure(String),
 
     /// A circular reference was detected in the specification.
-    CyclicReference(Cow<'a, str>),
+    CyclicReference(String),
 
     /// A specified path does not exist in the specification.
-    PathNotFound(Cow<'a, str>),
+    PathNotFound(String),
 }
 
-impl<'a> TraverserError<'a> {
+impl TraverserError {
     /// Creates a new `MissingField` error.
     ///
     /// # Parameters
     /// - `message`: The field name or description that was missing
     #[inline]
-    pub(crate) fn missing_field(message: impl Into<Cow<'a, str>>) -> Self {
+    pub(crate) fn missing_field(message: impl Into<String>) -> Self {
         Self::MissingField(message.into())
     }
 
@@ -57,10 +53,7 @@ impl<'a> TraverserError<'a> {
     /// - `expected`: The expected type description
     /// - `found`: The actual type that was found
     #[inline]
-    pub(crate) fn type_mismatch(
-        expected: impl Into<Cow<'a, str>>,
-        found: impl Into<Cow<'a, str>>,
-    ) -> Self {
+    pub(crate) fn type_mismatch(expected: impl Into<String>, found: impl Into<String>) -> Self {
         Self::TypeMismatch {
             expected: expected.into(),
             found: found.into(),
@@ -72,7 +65,7 @@ impl<'a> TraverserError<'a> {
     /// # Parameters
     /// - `message`: Description of the structural issue
     #[inline]
-    pub(crate) fn invalid_structure(message: impl Into<Cow<'a, str>>) -> Self {
+    pub(crate) fn invalid_structure(message: impl Into<String>) -> Self {
         Self::InvalidStructure(message.into())
     }
 
@@ -81,7 +74,7 @@ impl<'a> TraverserError<'a> {
     /// # Parameters
     /// - `message`: Description of the circular reference
     #[inline]
-    pub(crate) fn cyclic_reference(message: impl Into<Cow<'a, str>>) -> Self {
+    pub(crate) fn cyclic_reference(message: impl Into<String>) -> Self {
         Self::CyclicReference(message.into())
     }
 
@@ -90,12 +83,12 @@ impl<'a> TraverserError<'a> {
     /// # Parameters
     /// - `message`: The path that could not be found
     #[inline]
-    pub(crate) fn path_not_found(message: impl Into<Cow<'a, str>>) -> Self {
+    pub(crate) fn path_not_found(message: impl Into<String>) -> Self {
         Self::PathNotFound(message.into())
     }
 }
 
-impl Display for TraverserError<'_> {
+impl Display for TraverserError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             TraverserError::MissingField(field) => {
@@ -117,7 +110,7 @@ impl Display for TraverserError<'_> {
     }
 }
 
-impl std::error::Error for TraverserError<'_> {}
+impl std::error::Error for TraverserError {}
 
 /// Represents the result of a search operation within the OpenAPI specification.
 ///
@@ -224,7 +217,7 @@ impl OpenApiTraverser {
     /// # Behavior
     /// This constructor automatically crawls all paths in the specification to build
     /// an internal routing tree for efficient operation lookup.
-    pub fn new<'a>(specification: Value) -> Result<Self, TraverserError<'a>> {
+    pub fn new<'a>(specification: Value) -> Result<Self, TraverserError> {
         let mut traverser = Self {
             specification,
             resolved_references: DashMap::new(),
@@ -333,10 +326,10 @@ impl OpenApiTraverser {
         cache: &DashMap<K, Arc<V>>,
         key: K,
         resolver: F,
-    ) -> Result<Arc<V>, TraverserError<'a>>
+    ) -> Result<Arc<V>, TraverserError>
     where
         K: Eq + Hash,
-        F: FnOnce() -> Result<Arc<V>, TraverserError<'a>>,
+        F: FnOnce() -> Result<Arc<V>, TraverserError>,
     {
         let entry = cache.entry(key);
         match entry {
@@ -431,7 +424,6 @@ impl OpenApiTraverser {
         let binding = request_method.to_lowercase();
         let request_method = binding.as_str();
         let segments = Self::split_path_segments(request_path);
-
         Self::resolve_with_cache(
             &self.resolved_operations,
             (String::from(request_path), String::from(request_method)),
@@ -607,11 +599,7 @@ impl OpenApiTraverser {
     /// # Behavior
     /// Automatically resolves JSON references ($ref) before field lookup. Returns
     /// `MissingField` error if the field doesn't exist after reference resolution.
-    pub fn get_required<'node>(
-        &'node self,
-        node: &'node Value,
-        field: &'node str,
-    ) -> TraverseSearchResult<'node> {
+    pub fn get_required<'n>(&'n self, node: &'n Value, field: &'n str) -> TraverseSearchResult<'n> {
         let ref_result = self.resolve_possible_ref(node)?;
         match ref_result {
             SearchResult::Arc(val) => match val.get(field) {
@@ -632,7 +620,7 @@ impl OpenApiTraverser {
     ///
     /// # Returns
     /// A `SearchResult` containing either the original node or the resolved reference.
-    fn resolve_possible_ref<'node>(&'node self, node: &'node Value) -> TraverseSearchResult<'node> {
+    fn resolve_possible_ref<'n>(&'n self, node: &'n Value) -> TraverseSearchResult<'n> {
         if let Ok(ref_string) = Self::get_as_str(node, REF_FIELD) {
             let result = Self::resolve_with_cache(
                 &self.resolved_references,
@@ -659,13 +647,13 @@ impl OpenApiTraverser {
     ///
     /// # Returns
     /// The resolved JSON node or an error if the reference is invalid or circular.
-    fn get_reference_path<'node, 'sub_node>(
-        &'node self,
-        ref_string: &'node str,
-        seen_references: &mut HashSet<&'node str>,
-    ) -> TraverseSearchResult<'sub_node>
+    fn get_reference_path<'n, 's>(
+        &'n self,
+        ref_string: &'n str,
+        seen_references: &mut HashSet<&'n str>,
+    ) -> TraverseSearchResult<'s>
     where
-        'node: 'sub_node,
+        'n: 's,
     {
         if seen_references.contains(ref_string) {
             return Err(TraverserError::cyclic_reference(ref_string));
@@ -723,7 +711,7 @@ impl OpenApiTraverser {
         node: &'n Value,
         converter: F,
         type_name: &'static str,
-    ) -> Result<T, TraverserError<'s>>
+    ) -> Result<T, TraverserError>
     where
         'n: 's,
         F: Fn(&'n Value) -> Option<T>,
@@ -792,7 +780,7 @@ impl OpenApiTraverser {
     ///
     /// # Returns
     /// The boolean value or a type mismatch error.
-    pub(crate) fn require_bool<'n, 's>(node: &'n Value) -> Result<bool, TraverserError<'s>>
+    pub(crate) fn require_bool<'n, 's>(node: &'n Value) -> Result<bool, TraverserError>
     where
         'n: 's,
     {

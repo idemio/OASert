@@ -1,12 +1,15 @@
+pub mod builder;
 mod request_body;
 mod request_parameter;
 mod scope;
 
+use crate::converter::HttpLike;
 use crate::error::ValidationErrorType;
-use crate::traverser::OpenApiTraverser;
+use crate::traverser::{OpenApiTraverser, TraverserError};
 use crate::types::json_path::JsonPath;
+use crate::types::primitive::PrimitiveError;
 use crate::types::version::OpenApiVersion;
-use crate::types::{HttpLike, Operation, ParameterLocation};
+use crate::types::{operation::Operation, ParameterLocation};
 use crate::validator::request_body::RequestBodyValidator;
 use crate::validator::request_parameter::RequestParameterValidator;
 use crate::validator::scope::RequestScopeValidator;
@@ -15,6 +18,7 @@ use http::HeaderMap;
 use jsonschema::{Resource, ValidationOptions, Validator as JsonValidator};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -26,8 +30,6 @@ pub struct OpenApiPayloadValidator {
 impl OpenApiPayloadValidator {
     pub fn new(value: Value) -> Result<Self, ValidationErrorType> {
         let mut value = value;
-        // Assign ID for schema validation in the future.
-        println!("{:?}", value);
         value["$id"] = json!("@@root");
         let version = match OpenApiTraverser::get_as_str(&value, OPENAPI_FIELD) {
             Ok(version) => version,
@@ -165,9 +167,11 @@ impl OpenApiPayloadValidator {
     /// ```
     pub fn find_operation(
         &self,
-        path: &str,
-        method: &str,
-    ) -> Result<Arc<Operation>, ValidationErrorType> {
+        path: impl AsRef<str>,
+        method: impl AsRef<str>,
+    ) -> Result<Arc<Operation>, ValidationError> {
+        let path = path.as_ref();
+        let method = method.as_ref();
         match self
             .traverser
             .get_operation_from_path_and_method(path, method)
@@ -244,7 +248,7 @@ impl OpenApiPayloadValidator {
         &self,
         operation: &Operation,
         request: &impl HttpLike<T>,
-    ) -> Result<(), ValidationErrorType>
+    ) -> Result<(), ValidationError>
     where
         T: serde::ser::Serialize,
     {
@@ -282,12 +286,12 @@ impl OpenApiPayloadValidator {
     /// # Returns
     ///
     /// * `Ok(())` - If the request is valid, according to the OpenAPI specification
-    /// * `Err(ValidationErrorType)` - If any validation fails, with details about the failure
+    /// * `Err(ValidationError)` - If validation fails.
     pub fn validate_request<T>(
         &self,
         request: &impl HttpLike<T>,
         scopes: Option<&Vec<String>>,
-    ) -> Result<(), ValidationErrorType>
+    ) -> Result<(), ValidationError>
     where
         T: serde::ser::Serialize,
     {
@@ -320,11 +324,7 @@ impl OpenApiPayloadValidator {
     /// ## Returns
     ///
     /// * `Ok(())` - If all required header parameters are present and valid according to their schemas
-    /// * `Err(ValidationErrorType)` - If validation fails, with the specific error type indicating the reason:
-    ///   - `FieldExpected` - If a required header parameter is missing
-    ///   - `SchemaValidationFailed` - If a header value doesn't match its schema
-    ///   - `UnexpectedType` - If a header value has an incorrect type
-    ///   - Other error types depending on specific validation failures
+    /// * `Err(ValidationError)` - If validation fails.
     ///
     /// ## Example
     ///
@@ -364,7 +364,7 @@ impl OpenApiPayloadValidator {
         &self,
         operation: &Operation,
         headers: &HeaderMap,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let headers: HashMap<String, String> = headers
             .iter()
             .filter_map(|(key, value)| {
@@ -394,12 +394,8 @@ impl OpenApiPayloadValidator {
     ///
     /// ## Returns
     ///
-    /// * `Ok(())` - If all query parameters are valid according to the operation definition
-    /// * `Err(ValidationErrorType)` - If validation fails, returns one of several possible error types:
-    ///   - `FieldExpected` - When a required parameter is missing
-    ///   - `SchemaValidationFailed` - When a parameter value doesn't match the schema
-    ///   - `UnexpectedType` - When a parameter value type doesn't match the expected type
-    ///   - Various other validation errors depending on the specific validation failure
+    /// * `Ok(())` - If all query parameters are valid, according to the operation definition
+    /// * `Err(ValidationError)` - If validation fails.
     ///
     /// ## Example
     ///
@@ -437,7 +433,7 @@ impl OpenApiPayloadValidator {
         &self,
         operation: &Operation,
         query_params: &str,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let query_params: HashMap<String, String> = query_params
             .split("&")
             .filter_map(|pair| {
@@ -490,7 +486,7 @@ impl OpenApiPayloadValidator {
     /// # Example
     ///
     /// ```rust
-    /// use oasert::types::Operation;
+    /// use oasert::types::operation::Operation;
     /// use oasert::validator::OpenApiPayloadValidator;
     ///
     /// // Mini-spec for testing
@@ -526,7 +522,7 @@ impl OpenApiPayloadValidator {
         &self,
         operation: &Operation,
         scopes: &Vec<String>,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let validator = RequestScopeValidator::new(scopes);
         validator.validate(&self.traverser, operation, &self.options)
     }
@@ -547,22 +543,13 @@ pub(crate) trait Validator {
     /// # Returns
     ///
     /// * `Ok(())` - If the validation passes without errors.
-    /// * `Err(ValidationErrorType)` - If validation fails, returns one of several error types:
-    ///   - UnsupportedSpecVersion - When the OpenAPI version is not supported
-    ///   - SchemaValidationFailed - When schema validation fails
-    ///   - ValueExpected - When a required value is missing
-    ///   - SectionExpected - When a required section is missing
-    ///   - FieldExpected - When a required field is missing
-    ///   - UnexpectedType - When a value's type doesn't match the expected type
-    ///   - UnableToParse - When data cannot be parsed correctly
-    ///   - CircularReference - When a circular reference is detected
-    ///   - InvalidRef - When a reference is invalid
+    /// * `Err(ValidationError)` - If validation fails.
     fn validate(
         &self,
         traverser: &OpenApiTraverser,
         operation: &Operation,
         validation_options: &ValidationOptions,
-    ) -> Result<(), ValidationErrorType>;
+    ) -> Result<(), ValidationError>;
 
     /// Validates a JSON instance against a schema referenced by a JSON path.
     ///
@@ -574,12 +561,12 @@ pub(crate) trait Validator {
     ///
     /// # Returns
     /// * `Ok(())` - If validation succeeds
-    /// * `Err(ValidationErrorType)` - If validation fails, containing the specific error type
+    /// * `Err(ValidationError)` - If validation fails.
     fn complex_validation_by_path<'a>(
         options: &ValidationOptions,
         json_path: &JsonPath,
         instance: &Value,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let full_pointer_path = format!("@@root#/{}", json_path.format_path());
         let schema = json!({
             REF_FIELD: full_pointer_path
@@ -603,12 +590,12 @@ pub(crate) trait Validator {
     /// # Returns
     ///
     /// * `Ok(())` - If validation succeeds
-    /// * `Err(ValidationErrorType)` - If validation fails, containing details about the validation error
+    /// * `Err(ValidationError)` - If validation fails.
     fn complex_validation_by_schema(
         options: &ValidationOptions,
         schema: &Value,
         instance: &Value,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let validator = Self::build_validator(options, schema)?;
         Self::do_validate(&validator, instance)
     }
@@ -622,17 +609,14 @@ pub(crate) trait Validator {
     ///
     /// # Returns
     /// * `Ok(())` - If the validation passes.
-    /// * `Err(ValidationErrorType::SchemaValidationFailed)` - If validation fails, containing the error message and section where the failure occurred.
+    /// * `Err(ValidationError)` - If validation fails.
     fn do_validate(
         validator: &jsonschema::Validator,
         instance: &Value,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         match validator.validate(instance) {
             Ok(_) => Ok(()),
-            Err(e) => Err(ValidationErrorType::schema_validation_failed(
-                e,
-                &format!("Instance {} failed validation", instance.to_string()),
-            )),
+            Err(e) => Err(ValidationError::validation_error(e.to_string(), instance)),
         }
     }
 
@@ -646,26 +630,76 @@ pub(crate) trait Validator {
     /// # Returns
     ///
     /// * `Ok(JsonValidator)` - A successfully built JSON validator
-    /// * `Err(ValidationErrorType::SchemaValidationFailed)` - If the schema validation fails during validator construction
+    /// * `Err(ValidationError)` - If the schema validation fails.
     fn build_validator<'a>(
         validation_options: &ValidationOptions,
         schema: &Value,
-    ) -> Result<JsonValidator, ValidationErrorType> {
+    ) -> Result<JsonValidator, ValidationError> {
         let validator = match validation_options.build(&schema) {
             Ok(val) => val,
             Err(e) => {
-                return Err(ValidationErrorType::schema_validation_failed(
-                    e,
-                    &format!(
-                        "Failed to build validator for schema {}",
-                        schema.to_string()
-                    ),
-                ));
+                return Err(ValidationError::validator_builder_error(schema));
             }
         };
         Ok(validator)
     }
 }
+
+#[derive(Debug)]
+pub enum ValidationError {
+    ValidatorBuildError(String),
+    ValidationError(String),
+    ValidationTraversalError(TraverserError),
+    ValidationPrimitiveError(PrimitiveError),
+}
+
+impl ValidationError {
+    #[inline]
+    pub fn validator_builder_error(schema: &Value) -> Self {
+        let msg = format!(
+            "Failed to build validator for schema {}",
+            schema.to_string()
+        );
+        ValidationError::ValidatorBuildError(msg)
+    }
+
+    #[inline]
+    pub fn validation_error(msg: impl Into<String>, instance: &Value) -> Self {
+        let full_msg = format!("{} for {}", msg.into(), instance.to_string());
+        ValidationError::ValidationError(full_msg)
+    }
+
+    #[inline]
+    pub const fn validation_traversal_error(e: TraverserError) -> Self {
+        ValidationError::ValidationTraversalError(e)
+    }
+
+    #[inline]
+    pub const fn validation_primitive_error(e: PrimitiveError) -> Self {
+        ValidationError::ValidationPrimitiveError(e)
+    }
+}
+
+impl Display for ValidationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationError::ValidatorBuildError(msg) => {
+                write!(f, "Failed to build validator: {}", msg)
+            }
+            ValidationError::ValidationError(msg) => {
+                write!(f, "Validation failed: {}", msg)
+            }
+            ValidationError::ValidationTraversalError(e) => {
+                write!(f, "Traversal error occurred while validating: {}", e)
+            }
+            ValidationError::ValidationPrimitiveError(e) => {
+                write!(f, "Primitive error occurred while validating: {}", e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ValidationError {}
 
 #[cfg(test)]
 mod test {

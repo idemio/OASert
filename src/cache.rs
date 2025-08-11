@@ -1,7 +1,7 @@
 use crate::error::ValidationErrorType;
 use crate::validator::OpenApiPayloadValidator;
 use dashmap::{DashMap, Entry, VacantEntry};
-use serde_json::{Error, Value};
+use serde_json::Value;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::path::Path;
@@ -21,6 +21,13 @@ pub enum CacheError {
     ValidatorAlreadyExists,
     /// Attempted to create a new validator but failed.
     FailedToCreateValidator(ValidationErrorType),
+    IoError(String),
+}
+
+impl CacheError {
+    pub fn io_error(msg: impl Into<String>) -> Self {
+        CacheError::IoError(msg.into())
+    }
 }
 
 impl Display for CacheError {
@@ -28,6 +35,7 @@ impl Display for CacheError {
         match self {
             CacheError::ValidatorNotFound => write!(f, "Validator not found in cache"),
             CacheError::ValidatorAlreadyExists => write!(f, "Validator already exists in cache"),
+            CacheError::IoError(msg) => write!(f, "IO error: {}", msg),
             CacheError::FailedToCreateValidator(err) => {
                 write!(f, "Failed to create new validator: {}", err)
             }
@@ -54,7 +62,7 @@ where
     pub fn insert_from_file_path<P>(
         &self,
         id: K,
-        file_path: P,
+        file_path: &P,
     ) -> Result<Arc<OpenApiPayloadValidator>, CacheError>
     where
         P: AsRef<Path>,
@@ -62,11 +70,16 @@ where
         let path = file_path.as_ref();
         let content = match std::fs::read_to_string(path) {
             Ok(x) => x,
-            Err(_) => todo!(),
+            Err(e) => return Err(CacheError::io_error(format!("Could not read file: {}", e))),
         };
         let content: Value = match serde_json::from_str(&content) {
             Ok(val) => val,
-            Err(e) => panic!("Failed to parse JSON: {}", e),
+            Err(e) => {
+                return Err(CacheError::io_error(format!(
+                    "Could not parse content as JSON: {}",
+                    e
+                )));
+            }
         };
         self.insert(id, content)
     }

@@ -1,14 +1,16 @@
 use crate::{ENCODED_BACKSLASH, ENCODED_TILDE, PATH_SEPARATOR, TILDE};
+use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct JsonPath(pub Vec<String>);
 
 impl JsonPath {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         JsonPath(Vec::new())
     }
 
-    pub(crate) fn add(&mut self, segment: &str) -> &mut Self {
+    pub fn add(&mut self, segment: impl AsRef<str>) -> &mut Self {
+        let segment = segment.as_ref();
         if segment.contains(TILDE) || segment.contains(PATH_SEPARATOR) {
             let segment = segment
                 .replace(TILDE, ENCODED_TILDE)
@@ -21,7 +23,7 @@ impl JsonPath {
         self
     }
 
-    pub(crate) fn format_path(&self) -> String {
+    pub fn format_path(&self) -> String {
         self.0.join(PATH_SEPARATOR)
     }
 }

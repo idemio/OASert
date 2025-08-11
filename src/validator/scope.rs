@@ -1,7 +1,7 @@
 use crate::error::ValidationErrorType;
 use crate::traverser::OpenApiTraverser;
-use crate::types::Operation;
-use crate::validator::Validator;
+use crate::types::operation::Operation;
+use crate::validator::{ValidationError, Validator};
 use crate::SECURITY_FIELD;
 use jsonschema::ValidationOptions;
 use serde_json::Value;
@@ -23,17 +23,11 @@ impl<'validator> RequestScopeValidator<'validator> {
         security_definitions: &Value,
         request_scopes: &HashSet<&str>,
         operation_id: &str,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let security_defs = match OpenApiTraverser::require_array(security_definitions) {
             Ok(security_defs) => security_defs,
             Err(e) => {
-                return Err(ValidationErrorType::traversal_failed(
-                    e,
-                    &format!(
-                        "Failed to parse security definitions as a vector in operation '{}'",
-                        operation_id
-                    ),
-                ));
+                return Err(ValidationError::validation_traversal_error(e));
             }
         };
 
@@ -46,13 +40,7 @@ impl<'validator> RequestScopeValidator<'validator> {
             let security_def = match OpenApiTraverser::require_object(security_definition) {
                 Ok(security_def) => security_def,
                 Err(e) => {
-                    return Err(ValidationErrorType::traversal_failed(
-                        e,
-                        &format!(
-                            "Failed to parse security definition as a map in operation '{}'",
-                            operation_id
-                        ),
-                    ));
+                    return Err(ValidationError::validation_traversal_error(e));
                 }
             };
 
@@ -60,13 +48,7 @@ impl<'validator> RequestScopeValidator<'validator> {
                 let scope_list = match OpenApiTraverser::require_array(scope_list) {
                     Ok(scope_list) => scope_list,
                     Err(e) => {
-                        return Err(ValidationErrorType::traversal_failed(
-                            e,
-                            &format!(
-                                "Failed to parse scope list as a list in operation '{}'",
-                                operation_id
-                            ),
-                        ));
+                        return Err(ValidationError::validation_traversal_error(e));
                     }
                 };
 
@@ -75,13 +57,7 @@ impl<'validator> RequestScopeValidator<'validator> {
                     let scope = match OpenApiTraverser::require_str(scope) {
                         Ok(scope) => scope,
                         Err(e) => {
-                            return Err(ValidationErrorType::traversal_failed(
-                                e,
-                                &format!(
-                                    "Failed to parse scope as a string in operation '{}'",
-                                    operation_id
-                                ),
-                            ));
+                            return Err(ValidationError::validation_traversal_error(e));
                         }
                     };
                     if !request_scopes.contains(scope) {
@@ -96,15 +72,18 @@ impl<'validator> RequestScopeValidator<'validator> {
                 }
             }
         }
-        Err(ValidationErrorType::assertion_failed(&format!(
-            "Request scopes {} did not match any security definition in operation '{}'",
-            request_scopes
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<String>>()
-                .join(", "),
-            operation_id
-        )))
+        Err(ValidationError::validation_error(
+            &format!(
+                "Request scopes {} did not match any security definition in operation '{}'",
+                request_scopes
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", "),
+                operation_id
+            ),
+            security_definitions,
+        ))
     }
 }
 
@@ -114,7 +93,7 @@ impl Validator for RequestScopeValidator<'_> {
         traverser: &OpenApiTraverser,
         op: &Operation,
         _validation_options: &ValidationOptions,
-    ) -> Result<(), ValidationErrorType> {
+    ) -> Result<(), ValidationError> {
         let op = &op.data;
         let operation_id = OpenApiTraverser::get_as_str(&op, "operationId")
             .unwrap_or_else(|_| "default_operation_id");
@@ -123,10 +102,7 @@ impl Validator for RequestScopeValidator<'_> {
         let security_defs = match traverser.get_optional(op, SECURITY_FIELD) {
             Ok(security_defs) => security_defs,
             Err(e) => {
-                return Err(ValidationErrorType::traversal_failed(
-                    e,
-                    &format!("Failed to get 'security' from operation '{}'", operation_id),
-                ));
+                return Err(ValidationError::validation_traversal_error(e));
             }
         };
 
@@ -142,10 +118,7 @@ impl Validator for RequestScopeValidator<'_> {
             match traverser.get_optional(traverser.specification(), SECURITY_FIELD) {
                 Ok(global_security_defs) => global_security_defs,
                 Err(e) => {
-                    return Err(ValidationErrorType::traversal_failed(
-                        e,
-                        "Failed to get global 'security' from specification",
-                    ));
+                    return Err(ValidationError::validation_traversal_error(e));
                 }
             };
 
@@ -163,7 +136,7 @@ impl Validator for RequestScopeValidator<'_> {
 #[cfg(test)]
 mod test {
     use crate::types::json_path::JsonPath;
-    use crate::types::Operation;
+    use crate::types::operation::Operation;
     use crate::validator::OpenApiPayloadValidator;
     use serde_json::{json, Value};
 
